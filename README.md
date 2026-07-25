@@ -21,11 +21,14 @@ automate it by *pretending to be a mouse* — brittle, blind, and unable to expl
 what it did.
 
 YogaNext inverts that. The domain core (`src/lib/types.ts`) is operated through a
-**14-tool surface** (`src/agent/contract.ts`) with model-facing descriptions and
+**24-tool surface** (`src/agent/contract.ts`) with model-facing descriptions and
 JSON-Schema inputs, emitted in **both Anthropic and OpenAI formats**. The React UI
 and the AI coach are *peer clients of the same store*.
 
-The invariant is enforced, not aspirational:
+The invariant is enforced, not aspirational — and, more importantly, the check has
+been **observed failing**. Repointing a single GUI control at a non-existent tool
+yields `FAILED — the GUI and the tool surface have drifted apart`. A check never seen
+to fail is decoration, not evidence:
 
 ```
 $ npm run verify:agent
@@ -88,7 +91,7 @@ therapy or medical care.
 src/lib/types.ts        the domain core — the UI never owns state or logic
 src/agent/contract.ts   TOOL_SPECS: the canonical capability surface
 src/agent/tools.ts      implementations (pure over the store, never throw)
-src/agent/manifest.ts   Anthropic + OpenAI schemas · verifyToolCoverage()
+src/agent/manifest.ts   Anthropic + OpenAI schemas · verifyAgentFirst() coverage+parity
 src/agent/local-agent.ts offline deterministic coach (no network, no key)
 src/lib/store.ts        zustand + localStorage, forgiving habit engine
 src/lib/insights.ts     n-gated, confidence-tagged observations
