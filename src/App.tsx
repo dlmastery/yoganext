@@ -6,9 +6,9 @@
  * tap away. No domain logic lives here — every action this shell can reach is a
  * store action, which is also an agent tool.
  *
- * Navigation is a real ARIA tablist with roving focus and arrow-key movement.
- * A bottom bar on phones, a left rail from `sm` up: the same tablist, laid out
- * twice, so there is exactly one source of truth for which view is showing.
+ * Navigation is a real ARIA tablist with roving focus and arrow-key movement:
+ * a bottom bar on phones, a left rail from `sm` up. Exactly ONE tablist is
+ * mounted at a time (see `useIsDesktop`) so the tab ids stay unique.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
@@ -16,6 +16,8 @@ import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { Activity, CircleUser, Flower2, MessageCircleHeart, Sun, X } from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
 import { useStore } from './lib/store';
+import { callTool } from './agent/tools';
+import { applyReduceMotion, applyTheme } from './lib/theme';
 import Today from './screens/Today';
 import Practice from './screens/Practice';
 import Progress from './screens/Progress';
@@ -50,7 +52,7 @@ function Aurora({ still }: { still: boolean }) {
         ].join(' ')}
         style={{
           background:
-            'radial-gradient(circle at 35% 35%, var(--accent, #6d5efc) 0%, transparent 68%)',
+            'radial-gradient(circle at 35% 35%, rgb(var(--accent, 139 124 255)) 0%, transparent 68%)',
           opacity: 0.38,
         }}
       />
@@ -61,7 +63,7 @@ function Aurora({ still }: { still: boolean }) {
         ].join(' ')}
         style={{
           background:
-            'radial-gradient(circle at 60% 40%, var(--accent-2, #22d3ee) 0%, transparent 66%)',
+            'radial-gradient(circle at 60% 40%, rgb(var(--accent-2, 232 121 199)) 0%, transparent 66%)',
           opacity: 0.3,
         }}
       />
@@ -72,13 +74,15 @@ function Aurora({ still }: { still: boolean }) {
         ].join(' ')}
         style={{
           background:
-            'radial-gradient(circle at 50% 50%, var(--accent, #6d5efc) 0%, transparent 70%)',
+            'radial-gradient(circle at 50% 50%, rgb(var(--accent, 139 124 255)) 0%, transparent 70%)',
           opacity: 0.22,
           animationDelay: '-6s',
         }}
       />
-      {/* vignette keeps text legible over the brightest part of the field */}
-      <div className="absolute inset-0 bg-[radial-gradient(120%_90%_at_50%_0%,transparent_25%,rgba(0,0,0,0.45)_100%)]" />
+      {/* Vignette — keeps text legible over the brightest part of the field.
+          Fades to the PAGE background, not to black, or the light `sand`
+          palette picks up a dirty grey border. */}
+      <div className="absolute inset-0 bg-[radial-gradient(120%_90%_at_50%_0%,transparent_25%,rgb(var(--bg)/0.6)_100%)]" />
     </div>
   );
 }
@@ -150,7 +154,7 @@ function Tabs({
               <motion.span
                 layoutId={`tab-pill-${orientation}`}
                 aria-hidden="true"
-                className="absolute inset-0 -z-10 rounded-2xl bg-white/[0.08] ring-1 ring-white/10"
+                className="absolute inset-0 -z-10 rounded-2xl bg-fg/[0.08] ring-1 ring-line"
                 transition={{ type: 'spring', stiffness: 480, damping: 38 }}
               />
             )}
@@ -175,6 +179,28 @@ function Tabs({
   );
 }
 
+/**
+ * Which nav to mount. This is a JS media query rather than the obvious
+ * `hidden sm:flex` / `sm:hidden` pair because BOTH layouts would then exist in
+ * the DOM at once — duplicating every `id="tab-…"`. Duplicate ids are invalid
+ * HTML and make the panel's `aria-labelledby` ambiguous, so assistive tech can
+ * resolve it to the hidden copy. One tablist, mounted where it belongs.
+ */
+function useIsDesktop(): boolean {
+  const query = '(min-width: 640px)';
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    setIsDesktop(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+  return isDesktop;
+}
+
 // ─────────────────────────────────────────────────────────────────────── app ──
 
 const SCREENS: Record<ViewId, () => JSX.Element> = {
@@ -185,7 +211,17 @@ const SCREENS: Record<ViewId, () => JSX.Element> = {
 };
 
 export default function App() {
-  const [view, setView] = useState<ViewId>('today');
+  /**
+   * Which view is showing is STORE state, reached through the `navigate` tool —
+   * not a `useState` here. A tab index hidden in component state is a capability
+   * the GUI has and no agent can touch, and that asymmetry is the one thing an
+   * agent-first app must not have. The tab bar and "show me my progress" are now
+   * literally the same call.
+   */
+  const view = useStore((s) => s.view);
+  const setView = useCallback((v: ViewId) => {
+    callTool('navigate', { view: v });
+  }, []);
   const [coachOpen, setCoachOpen] = useState(false);
   /**
    * The store has no `cancelSession` by design — the only way out of an active
@@ -194,9 +230,9 @@ export default function App() {
    * and it must reset whenever a *new* session begins.
    */
   const [playerParked, setPlayerParked] = useState(false);
+  const isDesktop = useIsDesktop();
 
   const active = useStore((s) => s.active);
-  const resumeSession = useStore((s) => s.resumeSession);
   const settings = useStore((s) => s.settings);
   const reduceMotion = Boolean(settings?.reduceMotion);
 
@@ -205,12 +241,19 @@ export default function App() {
     if (startedAt) setPlayerParked(false);
   }, [startedAt]);
 
-  // The palette lives in CSS; the shell only says which one is on.
+  /**
+   * The palette lives in CSS keyed on `[data-theme]`; the shell only says which
+   * one is on. Delegated to `lib/theme` rather than setting the dataset here —
+   * it also updates `<meta name="theme-color">`, which CSS cannot reach, so the
+   * browser chrome matches the palette.
+   */
+  const theme = settings?.theme ?? 'aurora';
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = settings?.theme ?? 'aurora';
-    root.dataset.reduceMotion = reduceMotion ? 'true' : 'false';
-  }, [settings?.theme, reduceMotion]);
+    applyTheme(theme);
+  }, [theme]);
+  useEffect(() => {
+    applyReduceMotion(reduceMotion);
+  }, [reduceMotion]);
 
   const Screen = SCREENS[view];
 
@@ -227,7 +270,8 @@ export default function App() {
         </a>
 
         {/* Desktop rail */}
-        <aside className="fixed left-0 top-0 z-30 hidden h-dvh w-56 flex-col justify-between px-4 py-8 sm:flex">
+        {isDesktop && (
+        <aside className="fixed left-0 top-0 z-30 flex h-dvh w-56 flex-col justify-between px-4 py-8">
           <div className="flex flex-col gap-8">
             <div className="px-2">
               <p className="text-lg font-semibold tracking-tight">
@@ -242,12 +286,13 @@ export default function App() {
           <button
             type="button"
             onClick={() => setCoachOpen(true)}
-            className="flex items-center gap-2.5 rounded-2xl border border-white/10 px-4 py-3 text-sm font-medium text-fg transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex items-center gap-2.5 rounded-2xl border border-line px-4 py-3 text-sm font-medium text-fg transition-colors hover:bg-fg/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <MessageCircleHeart size={17} aria-hidden="true" className="text-accent" />
             Ask your coach
           </button>
         </aside>
+        )}
 
         {/* Content */}
         <main
@@ -255,7 +300,7 @@ export default function App() {
           role="tabpanel"
           aria-labelledby={`tab-${view}`}
           tabIndex={-1}
-          className="relative pb-28 sm:ml-56 sm:pb-12"
+          className={isDesktop ? 'relative ml-56 pb-12' : 'relative pb-28'}
         >
           <AnimatePresence mode="wait">
             <motion.div
@@ -271,14 +316,17 @@ export default function App() {
         </main>
 
         {/* Mobile bottom bar */}
-        <nav
-          aria-label="Main"
-          className="glass-strong fixed inset-x-0 bottom-0 z-30 border-t border-white/5 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1.5 sm:hidden"
-        >
-          <Tabs view={view} setView={setView} orientation="horizontal" />
-        </nav>
+        {!isDesktop && (
+          <nav
+            aria-label="Main"
+            className="glass-strong fixed inset-x-0 bottom-0 z-30 border-t border-line px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1.5"
+          >
+            <Tabs view={view} setView={setView} orientation="horizontal" />
+          </nav>
+        )}
 
-        {/* Coach FAB (mobile; the rail has its own button) */}
+        {/* Coach FAB (mobile only; the rail has its own button) */}
+        {!isDesktop && (
         <motion.button
           type="button"
           onClick={() => setCoachOpen((o) => !o)}
@@ -287,7 +335,7 @@ export default function App() {
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.93 }}
           transition={{ type: 'spring', stiffness: 480, damping: 26 }}
-          className="glass-strong fixed bottom-24 right-5 z-40 grid h-14 w-14 place-items-center rounded-full shadow-lg shadow-black/30 ring-1 ring-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:hidden"
+          className="glass-strong fixed bottom-24 right-5 z-40 grid h-14 w-14 place-items-center rounded-full shadow-lg shadow-black/30 ring-1 ring-line focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <AnimatePresence mode="wait" initial={false}>
             <motion.span
@@ -305,6 +353,7 @@ export default function App() {
             </motion.span>
           </AnimatePresence>
         </motion.button>
+        )}
 
         <AgentConsole open={coachOpen} onClose={() => setCoachOpen(false)} />
 
@@ -323,9 +372,9 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setPlayerParked(false);
-                  resumeSession();
+                  callTool('resume_session');
                 }}
-                className="glass-strong inline-flex items-center gap-3 rounded-full px-5 py-3 text-sm font-medium text-fg shadow-lg shadow-black/30 ring-1 ring-white/10 transition-transform hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="glass-strong inline-flex items-center gap-3 rounded-full px-5 py-3 text-sm font-medium text-fg shadow-lg shadow-black/30 ring-1 ring-line transition-transform hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <span
                   aria-hidden="true"

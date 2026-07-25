@@ -167,15 +167,13 @@ export function useSessionTimer({
   return { elapsed, elapsedRef, reset };
 }
 
-/** `615.4` -> `"10:15"`. Negative input clamps to zero. */
-export function formatClock(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-/** `615.4` -> `"10 minutes 15 seconds"`, for screen readers. */
+/**
+ * `615.4` -> `"10 minutes 15 seconds"`, for screen readers.
+ *
+ * Visual clock formatting is `mmss()` from `lib/format.ts` — it grows an hours
+ * field past 3600s, which matters because practices run up to 120 minutes and
+ * "+1 min" can push any session past the hour.
+ */
 export function spokenClock(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
   const m = Math.floor(total / 60);

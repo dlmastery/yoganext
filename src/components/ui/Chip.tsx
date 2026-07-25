@@ -47,7 +47,7 @@ export function Chip({ selected, onClick, children, groupId, className, dot }: C
       )}
       {selected && !groupId && <span className="absolute inset-0 -z-10 rounded-full bg-fg" />}
       {!selected && (
-        <span className="absolute inset-0 -z-10 rounded-full border border-white/10 bg-white/[0.03]" />
+        <span className="absolute inset-0 -z-10 rounded-full border border-line bg-fg/[0.04]" />
       )}
       {dot && (
         <span

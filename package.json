@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "agent:tools": "node --experimental-strip-types src/agent/print-manifest.ts"
+    "agent:tools": "node --experimental-strip-types src/agent/print-manifest.ts",
+    "verify:agent": "node --experimental-strip-types src/agent/verify.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

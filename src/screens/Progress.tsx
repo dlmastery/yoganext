@@ -112,8 +112,8 @@ function Heatmap({ sessions, practiceDays }: { sessions: Session[]; practiceDays
         >
           <defs>
             <linearGradient id={`hm-${gradId}`} x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stopColor="var(--accent, #8b5cf6)" />
-              <stop offset="100%" stopColor="var(--accent-2, var(--accent, #22d3ee))" />
+              <stop offset="0%" stopColor="rgb(var(--accent, 139 124 255))" />
+              <stop offset="100%" stopColor="rgb(var(--accent-2, 232 121 199))" />
             </linearGradient>
           </defs>
 
@@ -139,7 +139,7 @@ function Heatmap({ sessions, practiceDays }: { sessions: Session[]; practiceDays
               height={CELL}
               rx={3.5}
               fill={c.lvl === 0 ? 'currentColor' : `url(#hm-${gradId})`}
-              className="text-white"
+              className="text-fg"
               initial={{ opacity: 0, scale: 0.6 }}
               animate={{ opacity: LEVEL_OPACITY[c.lvl], scale: 1 }}
               transition={{ delay: 0.004 * (c.col * 7 + c.row), duration: 0.35 }}
@@ -170,8 +170,8 @@ function Heatmap({ sessions, practiceDays }: { sessions: Session[]; practiceDays
             style={{
               background:
                 i === 0
-                  ? 'rgba(255,255,255,0.07)'
-                  : 'linear-gradient(135deg, var(--accent, #8b5cf6), var(--accent-2, #22d3ee))',
+                  ? 'rgb(var(--fg) / 0.09)'
+                  : 'linear-gradient(135deg, rgb(var(--accent, 139 124 255)), rgb(var(--accent-2, 232 121 199)))',
               opacity: i === 0 ? 1 : o,
             }}
           />
@@ -222,15 +222,15 @@ function MoodSparkline({ moods }: { moods: MoodEntry[] }) {
       >
         <defs>
           <linearGradient id={`spark-${gradId}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--accent, #8b5cf6)" stopOpacity={0.35} />
-            <stop offset="100%" stopColor="var(--accent, #8b5cf6)" stopOpacity={0} />
+            <stop offset="0%" stopColor="rgb(var(--accent, 139 124 255))" stopOpacity={0.35} />
+            <stop offset="100%" stopColor="rgb(var(--accent, 139 124 255))" stopOpacity={0} />
           </linearGradient>
         </defs>
         <path d={area} fill={`url(#spark-${gradId})`} />
         <motion.path
           d={line}
           fill="none"
-          stroke="var(--accent, #8b5cf6)"
+          stroke="rgb(var(--accent, 139 124 255))"
           strokeWidth={2}
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -239,7 +239,7 @@ function MoodSparkline({ moods }: { moods: MoodEntry[] }) {
           transition={{ duration: 0.9, ease: 'easeOut' }}
           vectorEffect="non-scaling-stroke"
         />
-        <circle cx={xs(points.length - 1)} cy={ys(last)} r={3} fill="var(--accent, #8b5cf6)" />
+        <circle cx={xs(points.length - 1)} cy={ys(last)} r={3} fill="rgb(var(--accent, 139 124 255))" />
       </svg>
       <figcaption className="text-xs text-fg-muted">
         Last {points.length} check-ins · average {mean.toFixed(1)} / 5

@@ -33,12 +33,16 @@ import type {
   HabitState,
   MoodEntry,
   MoodScore,
+  Pose,
   Practice,
+  PracticeKind,
   Session,
   Settings,
 } from './types.ts';
 import { achievementProgress, recordSession, reconcile } from './habit.ts';
 import { clamp, dayKey } from './format.ts';
+import { PRACTICES } from '../data/practices.ts';
+import { SEED_MOODS, SEED_SESSIONS } from '../data/seed.ts';
 
 // ────────────────────────────────────────────────────────────────── constants ──
 
@@ -55,16 +59,60 @@ const CUSTOM_TAG = 'custom';
 
 const THEMES: Settings['theme'][] = ['aurora', 'dusk', 'forest', 'sand'];
 const SOUNDSCAPES: Settings['soundscape'][] = ['none', 'rain', 'ocean', 'forest', 'singing-bowl'];
+const KINDS: PracticeKind[] = ['meditation', 'breathwork', 'yoga', 'sleep', 'journal'];
+
+// ───────────────────────────────────────────────────────── the shell's state ──
 
 /**
- * The seed practice library.
+ * Below is the SHELL's state — which screen is showing, how the library is
+ * filtered, and the ephemera of the running player (bonus time, per-pose
+ * extensions, mute). It deliberately does NOT live in `types.ts`: `AppState` and
+ * `Settings` describe the practice *domain*, and a tab index is not part of it.
  *
- * Left empty here on purpose: `src/data/` owns the content, and `Today.tsx`
- * already renders an explicit empty state. The app entry (or a data module)
- * calls `hydratePractices()` once at boot. Doing it this way means a missing or
- * late content module degrades to "no practices yet" rather than a build error.
+ * It lives in the store rather than in `useState` for exactly one reason: each
+ * of these is now a user-visible capability with a tool behind it (`navigate`,
+ * `filter_library`, `extend_session`, `skip_pose`, `set_accessibility`), and a
+ * capability hidden in component state is a capability no agent can reach. That
+ * asymmetry — GUI can, agent cannot — is the parity gap `verifyUiParity()`
+ * exists to catch. None of it is persisted: a tab, a filter and a bonus minute
+ * are all things a fresh page load should forget.
  */
-const SEED_PRACTICES: Practice[] = [];
+export type ViewId = 'today' | 'practice' | 'progress' | 'you';
+
+export const VIEW_IDS: readonly ViewId[] = ['today', 'practice', 'progress', 'you'];
+
+export interface LibraryFilter {
+  /** `'all'` means no kind filter. */
+  kind: PracticeKind | 'all';
+  /** Longest practice to show, or `null` for any length. */
+  maxMinutes: number | null;
+}
+
+/** Everything the player accumulates that is not part of the domain session. */
+export interface PlayerState {
+  /** Seconds added to the running practice by `extend_session`. */
+  bonusSeconds: number;
+  /** Extra seconds granted to individual poses, keyed by pose index. */
+  poseExtensions: Record<number, number>;
+  /** Seconds of the pose timeline jumped over by `skip_pose`. */
+  poseSkipSeconds: number;
+}
+
+export const defaultLibraryFilter = (): LibraryFilter => ({ kind: 'all', maxMinutes: null });
+
+export const defaultPlayer = (): PlayerState => ({
+  bonusSeconds: 0,
+  poseExtensions: {},
+  poseSkipSeconds: 0,
+});
+
+/**
+ * The seed practice library, owned by `src/data/`. It is deliberately NOT
+ * persisted (see `partialize`): writing it to disk would freeze whatever
+ * shipped on the day of install and never update it again. `hydratePractices()`
+ * remains available for tests and for swapping the library at runtime.
+ */
+const SEED_PRACTICES: Practice[] = PRACTICES;
 
 // ──────────────────────────────────────────────────────────────────── defaults ──
 
@@ -85,6 +133,7 @@ export const defaultSettings = (): Settings => ({
   name: '',
 });
 
+/** A genuinely blank slate — what `reset()` produces. */
 export const defaultAppState = (): AppState => ({
   practices: [...SEED_PRACTICES],
   sessions: [],
@@ -94,6 +143,40 @@ export const defaultAppState = (): AppState => ({
   active: null,
   settings: defaultSettings(),
 });
+
+/**
+ * What a first-time visitor sees: three weeks of imperfect history from
+ * `data/seed.ts`.
+ *
+ * This is the store's INITIAL state, not a fallback — the moment a persisted
+ * blob exists, `merge()` replaces every history slice with the user's own data,
+ * including when that data is legitimately empty. So a returning user never
+ * sees the demo, and `reset()` goes to `defaultAppState()` rather than here:
+ * "wipe everything on this device" has to actually mean wiped.
+ *
+ * The habit fields are folded from the seed sessions rather than hardcoded, so
+ * the streak, grace and achievements shown are the ones the real engine derives.
+ */
+export function firstRunState(): AppState {
+  const base = defaultAppState();
+  const sessions = [...SEED_SESSIONS];
+  const today = dayKey(new Date());
+
+  let habit = base.habit;
+  const chronological = sessions
+    .filter((s) => s.completed)
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  for (const s of chronological) {
+    const day = dayKey(s.startedAt);
+    if (day) habit = recordSession(habit, { day, seconds: s.seconds, today: day });
+  }
+  // Re-anchor streak and grace on the actual current date; the loop above ends
+  // anchored to the last seeded session, which may be days ago.
+  habit = reconcile(habit, today);
+
+  const state: AppState = { ...base, sessions, moods: [...SEED_MOODS], habit };
+  return { ...state, achievements: achievementProgress(state, new Date().toISOString()) };
+}
 
 // ───────────────────────────────────────────────────────────────────── helpers ──
 
@@ -135,6 +218,70 @@ function flushActive(sessions: Session[], active: ActiveSession | null): Session
     return { ...s, seconds: Math.max(s.seconds, Math.round(active.elapsed)) };
   });
   return touched ? next : sessions;
+}
+
+/** Where a pose sequence is at time `t`, given any per-pose extensions. */
+export interface PoseAtTime {
+  index: number;
+  pose: Pose;
+  /** the pose's length including its extension */
+  duration: number;
+  elapsedInPose: number;
+  remaining: number;
+  progress: number;
+  /** true once the clock has run past the end of the last pose */
+  finished: boolean;
+}
+
+/**
+ * The pose timeline, DERIVED rather than stepped: cumulative offsets are walked
+ * from the session clock, so auto-advance is arithmetic instead of a timer that
+ * can drift out of sync, and a backgrounded tab returns to the right pose.
+ *
+ * It lives here, next to `skipPose`, because the skip action and the sequencer
+ * component must agree exactly on where the current pose ends — two copies of
+ * this loop would be two answers to "how much is left".
+ */
+export function poseAt(
+  poses: Pose[],
+  extensions: Record<number, number>,
+  t: number,
+): PoseAtTime | null {
+  if (poses.length === 0) return null;
+  const time = Math.max(0, Number.isFinite(t) ? t : 0);
+  let cursor = 0;
+
+  for (let i = 0; i < poses.length; i++) {
+    const duration = Math.max(1, poses[i].seconds + (extensions[i] ?? 0));
+    if (time < cursor + duration || i === poses.length - 1) {
+      const elapsedInPose = Math.min(Math.max(time - cursor, 0), duration);
+      return {
+        index: i,
+        pose: poses[i],
+        duration,
+        elapsedInPose,
+        remaining: Math.max(0, duration - elapsedInPose),
+        progress: elapsedInPose / duration,
+        finished: i === poses.length - 1 && time >= cursor + duration,
+      };
+    }
+    cursor += duration;
+  }
+  return null;
+}
+
+/**
+ * Drop an active session whose practice is not in the library.
+ *
+ * `active` only names a `practiceId`, so it can outlive the practice it points
+ * at — after a restore that dropped it, or a library swap. The resulting state
+ * is a trap: the player can render nothing, and `completeSession` is the only
+ * action that clears `active`, so the app believes a session is running that
+ * the user can neither see nor stop.
+ */
+function liveActive(practices: Practice[], active: ActiveSession | null): ActiveSession | null {
+  if (!active) return null;
+  return practices.some((p) => p.id === active.practiceId) ? active : null;
 }
 
 /** Recompute achievements against a state snapshot. Never throws. */
@@ -206,37 +353,113 @@ function sanitizeHabit(raw: unknown): HabitState {
   };
 }
 
-function sanitizeSettings(raw: unknown): Settings {
-  const base = defaultSettings();
+/**
+ * @param base what an invalid field falls back to. On a restore this is the
+ *   factory default; on `updateSettings` it is the CURRENT settings, so one bad
+ *   value in a patch cannot quietly reset the user's other choices.
+ */
+function sanitizeSettings(raw: unknown, base: Settings = defaultSettings()): Settings {
   if (!isObj(raw)) return base;
   const theme = str(raw.theme) as Settings['theme'];
   const soundscape = str(raw.soundscape) as Settings['soundscape'];
+  const reminderAt = str(raw.reminderAt);
   return {
     theme: THEMES.includes(theme) ? theme : base.theme,
     reduceMotion: bool(raw.reduceMotion, base.reduceMotion),
     soundscape: SOUNDSCAPES.includes(soundscape) ? soundscape : base.soundscape,
-    reminderAt: /^\d{2}:\d{2}$/.test(str(raw.reminderAt)) ? str(raw.reminderAt) : '',
-    name: str(raw.name).slice(0, 60),
+    // An empty string is a valid value here: it means "reminder off".
+    reminderAt: reminderAt === '' || /^([01]\d|2[0-3]):[0-5]\d$/.test(reminderAt) ? reminderAt : '',
+    name: str(raw.name, base.name).slice(0, 60),
   };
 }
 
+const INTENSITIES: Practice['intensity'][] = ['restorative', 'gentle', 'balanced', 'strong'];
+
+/** `[secondsFromStart, line]` pairs. Anything not shaped like one is dropped. */
+function validateScript(raw: unknown): Practice['script'] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: Array<[number, string]> = [];
+  for (const cue of raw) {
+    if (!Array.isArray(cue) || cue.length < 2) continue;
+    const at = num(cue[0], -1);
+    if (at < 0 || typeof cue[1] !== 'string') continue;
+    out.push([at, cue[1]]);
+  }
+  // Cues are consumed by time, so restore them ordered regardless of how they
+  // were written.
+  return out.length ? out.sort((a, b) => a[0] - b[0]) : undefined;
+}
+
+function validatePoses(raw: unknown): Pose[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: Pose[] = [];
+  for (const p of raw) {
+    if (!isObj(p) || typeof p.name !== 'string') continue;
+    out.push({
+      id: str(p.id) || uid('pose'),
+      name: p.name,
+      // A zero-second pose would make the sequencer divide by zero.
+      seconds: clamp(num(p.seconds, 30), 1, 3600),
+      cue: str(p.cue),
+      glyph: str(p.glyph, 'circle'),
+      ...(typeof p.sanskrit === 'string' ? { sanskrit: p.sanskrit } : {}),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
+function validateBreath(raw: unknown): BreathPattern | undefined {
+  if (!isObj(raw) || typeof raw.name !== 'string') return undefined;
+  const phase = (v: unknown) => clamp(num(v), 0, 600);
+  const pattern: BreathPattern = {
+    id: str(raw.id) || uid('breath'),
+    name: raw.name,
+    inhale: phase(raw.inhale),
+    holdIn: phase(raw.holdIn),
+    exhale: phase(raw.exhale),
+    holdOut: phase(raw.holdOut),
+    why: str(raw.why),
+  };
+  // An all-zero pattern is an infinite loop in the breath orb, not a pattern.
+  return pattern.inhale + pattern.exhale > 0 ? pattern : undefined;
+}
+
+/**
+ * A Practice must survive a persist/restore round-trip LOSSLESSLY. Rebuilding
+ * field-by-field is what keeps a malformed blob from becoming a live object,
+ * but it means every optional field has to be carried explicitly — miss one and
+ * a custom practice quietly loses its script or its whole pose sequence on the
+ * next page load, with no error anywhere. `script`, `poses` and `breath` are
+ * validated element-by-element rather than cast, for the same reason: a cast
+ * would let `{poses: [{}, 3, null]}` reach the sequencer.
+ */
 function sanitizePractices(raw: unknown): Practice[] {
   if (!Array.isArray(raw)) return [];
   const out: Practice[] = [];
   for (const r of raw) {
     if (!isObj(r) || typeof r.id !== 'string' || typeof r.title !== 'string') continue;
-    const raw = Array.isArray(r.gradient) ? r.gradient : [];
-    const gradient: [string, string] = [str(raw[0], '#6366f1'), str(raw[1], '#a855f7')];
+
+    const stops = Array.isArray(r.gradient) ? r.gradient : [];
+    const gradient: [string, string] = [str(stops[0], '#6366f1'), str(stops[1], '#a855f7')];
+
+    const kind = str(r.kind) as PracticeKind;
+    const intensity = str(r.intensity) as Practice['intensity'];
+    const script = validateScript(r.script);
+    const poses = validatePoses(r.poses);
+    const breath = validateBreath(r.breath);
+
     out.push({
       id: r.id,
-      kind: str(r.kind, 'breathwork') as Practice['kind'],
+      kind: KINDS.includes(kind) ? kind : 'breathwork',
       title: r.title,
       subtitle: str(r.subtitle),
       minutes: clamp(num(r.minutes, 5), 1, 120),
-      intensity: str(r.intensity, 'gentle') as Practice['intensity'],
+      intensity: INTENSITIES.includes(intensity) ? intensity : 'gentle',
       gradient,
       tags: Array.isArray(r.tags) ? r.tags.filter((t): t is string => typeof t === 'string') : [],
-      ...(isObj(r.breath) ? { breath: r.breath as unknown as BreathPattern } : {}),
+      ...(script ? { script } : {}),
+      ...(poses ? { poses } : {}),
+      ...(breath ? { breath } : {}),
     });
   }
   return out;
@@ -248,7 +471,11 @@ function sanitizeActive(raw: unknown): ActiveSession | null {
     practiceId: raw.practiceId,
     startedAt: raw.startedAt,
     elapsed: Math.max(0, num(raw.elapsed)),
-    paused: bool(raw.paused, true), // a session restored from disk is never live
+    // Always paused, never merely defaulted to it. Someone who closed the tab
+    // mid-practice was persisted with `paused: false`; restoring that verbatim
+    // an hour later shows a live session whose timer stopped when the tab did.
+    // The elapsed time is kept — the choice to resume is the user's.
+    paused: true,
   };
 }
 
@@ -361,16 +588,67 @@ interface PersistedState {
   settings: Settings;
 }
 
+/**
+ * The projection written to disk. Shared by `partialize` and `exportJSON` so an
+ * export can never drift from what is actually persisted.
+ *
+ * Only user-authored practices are included: persisting the seed library would
+ * freeze whatever shipped on the day of install and never update it again.
+ */
+function toPersisted(s: AppState): PersistedState {
+  return {
+    practices: s.practices.filter(isCustom),
+    sessions: s.sessions,
+    moods: s.moods,
+    habit: s.habit,
+    achievements: s.achievements,
+    active: s.active,
+    settings: s.settings,
+  };
+}
+
 export interface StoreActions {
   /** Install the seed practice library. Idempotent; custom practices are kept. */
   hydratePractices: (practices: Practice[]) => void;
+
+  // the shell ---------------------------------------------------------------
+  /** Show a screen. The tab bar and `navigate` are the same call. */
+  setView: (view: ViewId) => void;
+  /**
+   * Replace the library filters WHOLESALE — an omitted field clears that filter,
+   * matching `filter_library`'s contract ("pass null/omit to clear"). Returns
+   * the filter actually applied, after validation.
+   */
+  setLibraryFilter: (next: Partial<LibraryFilter>) => LibraryFilter;
 
   // session lifecycle -------------------------------------------------------
   startSession: (practiceId: string, now?: string) => Session | null;
   pauseSession: () => void;
   resumeSession: () => void;
-  /** Advance the timer. The only action called on a loop — keep it cheap. */
-  tick: (seconds: number) => void;
+  /**
+   * Give the running practice more time. For a pose sequence the current pose
+   * is held for the same amount, otherwise the extra minute would be spent on
+   * an already-finished sequence. Returns null when nothing is running.
+   */
+  extendSession: (seconds: number) => { seconds: number; pose?: string } | null;
+  /**
+   * Stop without recording a completion. The session row STAYS in the log,
+   * incomplete and carrying its real duration — deleting it would quietly
+   * inflate the completion rate `insights.ts` reports. No streak credit.
+   */
+  abandonSession: (reason?: string, now?: string) => Session | null;
+  /** Jump a pose sequence to the next pose. Null if there is no sequence running. */
+  skipPose: () => { from: Pose; to: Pose | null; secondsSkipped: number } | null;
+  /**
+   * Advance the timer by `seconds`, which may be FRACTIONAL — a rAF loop can
+   * call `tick(0.016)` every frame and the deltas accumulate exactly. Defaults
+   * to 1 so a plain `tick()` from a `setInterval` means "one second".
+   *
+   * The only action called on a loop, so it is deliberately the cheapest one
+   * here: it touches `active` and nothing else. Elapsed time is mirrored onto
+   * the session record at transitions (pause/complete/start), not per tick.
+   */
+  tick: (seconds?: number) => void;
   completeSession: (moodAfter?: MoodScore, note?: string, now?: string) => Session | null;
 
   // logging -----------------------------------------------------------------
@@ -384,7 +662,22 @@ export interface StoreActions {
   setSoundscape: (soundscape: Settings['soundscape']) => void;
   setReduceMotion: (reduceMotion: boolean) => void;
   setName: (name: string) => void;
+  /** Alias of `setName`, named for the `set_profile` tool that calls it. */
+  setProfileName: (name: string) => void;
   setReminder: (hhmm: string) => void;
+  /**
+   * Comfort controls, patched together because a user who says "I get motion
+   * sick" usually wants both. `reduceMotion` is a persisted domain setting;
+   * `muted` is shell state (it silences the player without forgetting which
+   * soundscape they chose).
+   */
+  setAccessibility: (patch: { reduceMotion?: boolean; muted?: boolean }) => void;
+  /**
+   * Patch any subset of settings in one call — the You screen's general path.
+   * The result is run through the same validator as a restore, so an invalid
+   * theme or a malformed `reminderAt` is discarded rather than stored.
+   */
+  updateSettings: (patch: Partial<Settings>) => void;
 
   /** Add a custom breathing pattern, wrapped as a playable breathwork practice. */
   addBreathPattern: (pattern: BreathPattern) => Practice;
@@ -392,13 +685,34 @@ export interface StoreActions {
   // maintenance -------------------------------------------------------------
   /** Recompute streak/grace/achievements against `now`. Safe to call any time. */
   refresh: (now?: string) => void;
-  /** Wipe everything on this device. */
+  /**
+   * Erase all history on this device: sessions, moods, habit, achievements and
+   * custom practices. Named to be hard to call by accident — it is not
+   * undoable, so the UI must confirm first. The seed practice library remains,
+   * and the demo history does NOT come back (a wipe means wiped).
+   */
+  dangerouslyResetAll: () => void;
+  /** Alias of `dangerouslyResetAll`. Prefer the explicit name in new code. */
   reset: () => void;
+  /**
+   * The user's own data as pretty-printed JSON, for the You screen's export.
+   * Same shape as the persisted blob, plus an `exportedAt` stamp — so an export
+   * can be read back by a human and is not a private format.
+   */
+  exportJSON: () => string;
   /** Clear the "your saved data was reset" notice once the UI has shown it. */
   acknowledgeRecovery: () => void;
 }
 
 export interface Store extends AppState, StoreActions {
+  /** Which screen is showing. Not persisted — every visit starts on Today. */
+  view: ViewId;
+  /** The practice library's kind/length filters, as the user currently sees them. */
+  libraryFilter: LibraryFilter;
+  /** Bonus time and pose adjustments for the running session. */
+  player: PlayerState;
+  /** Player ambience silenced, without discarding the chosen soundscape. */
+  muted: boolean;
   /** True when a corrupt saved blob was discarded on load. Surface this. */
   _recovered: boolean;
   /** True once persistence has finished restoring (or decided there is nothing). */
@@ -410,18 +724,40 @@ export interface Store extends AppState, StoreActions {
 export const useStore = create<Store>()(
   persist(
     (set, get) => ({
-      ...defaultAppState(),
+      ...firstRunState(),
+      view: 'today',
+      libraryFilter: defaultLibraryFilter(),
+      player: defaultPlayer(),
+      muted: false,
       _recovered: false,
       _hydrated: false,
+
+      // ── the shell ────────────────────────────────────────────────────────
+      setView: (view) => set(() => (VIEW_IDS.includes(view) ? { view } : {})),
+
+      setLibraryFilter: (next) => {
+        const kind = next.kind;
+        const max = next.maxMinutes;
+        const applied: LibraryFilter = {
+          kind: kind && kind !== 'all' && KINDS.includes(kind) ? kind : 'all',
+          // A filter nobody can satisfy is worse than no filter: clamp rather
+          // than store a 0- or 10 000-minute ceiling.
+          maxMinutes:
+            typeof max === 'number' && Number.isFinite(max) ? clamp(Math.round(max), 1, 240) : null,
+        };
+        set({ libraryFilter: applied });
+        return applied;
+      },
 
       // ── practices ────────────────────────────────────────────────────────
       hydratePractices: (practices) =>
         set((s) => {
           const custom = s.practices.filter(isCustom);
           const seenCustom = new Set(custom.map((p) => p.id));
-          return {
-            practices: [...practices.filter((p) => !seenCustom.has(p.id)), ...custom],
-          };
+          const next = [...practices.filter((p) => !seenCustom.has(p.id)), ...custom];
+          // Swapping the library can orphan a running session the same way a
+          // restore can, so it gets the same guard.
+          return { practices: next, active: liveActive(next, s.active) };
         }),
 
       // ── session lifecycle ────────────────────────────────────────────────
@@ -456,6 +792,9 @@ export const useStore = create<Store>()(
           // the data or "you finish 60% of what you start" would be unknowable.
           sessions: [...flushActive(s.sessions, s.active), session],
           active: { practiceId: practice.id, startedAt: now, elapsed: 0, paused: false },
+          // A new practice starts with no bonus time and no pose adjustments;
+          // inheriting the last session's would silently lengthen this one.
+          player: defaultPlayer(),
         });
         return session;
       },
@@ -469,8 +808,75 @@ export const useStore = create<Store>()(
 
       resumeSession: () => set((s) => (s.active?.paused ? { active: { ...s.active, paused: false } } : {})),
 
-      tick: (seconds) =>
+      extendSession: (seconds) => {
+        const s = get();
+        if (!s.active) return null;
+        const add = clamp(Math.round(seconds), 1, 3600);
+
+        const practice = s.practices.find((p) => p.id === s.active!.practiceId);
+        const poses = practice?.poses ?? [];
+        const player: PlayerState = { ...s.player, bonusSeconds: s.player.bonusSeconds + add };
+
+        let pose: string | undefined;
+        if (poses.length > 0) {
+          const at = poseAt(poses, s.player.poseExtensions, s.active.elapsed + s.player.poseSkipSeconds);
+          if (at) {
+            // Keyed by INDEX, so a pose already left behind cannot be
+            // retroactively lengthened by a later "one more minute".
+            player.poseExtensions = {
+              ...s.player.poseExtensions,
+              [at.index]: (s.player.poseExtensions[at.index] ?? 0) + add,
+            };
+            pose = at.pose.name;
+          }
+        }
+
+        set({ player });
+        return pose ? { seconds: add, pose } : { seconds: add };
+      },
+
+      abandonSession: (reason) => {
+        const s = get();
+        if (!s.active) return null;
+
+        const active = s.active;
+        const seconds = Math.max(0, Math.round(active.elapsed));
+        const isThisOne = (row: Session): boolean =>
+          !row.completed && row.startedAt === active.startedAt && row.practiceId === active.practiceId;
+
+        const open = s.sessions.find(isThisOne);
+        const stopped: Session | null = open
+          ? { ...open, seconds, completed: false, ...(reason ? { note: reason } : {}) }
+          : null;
+        const sessions = stopped ? s.sessions.map((row) => (isThisOne(row) ? stopped : row)) : s.sessions;
+
+        // No `recordSession`: an abandoned practice earns no streak credit. It
+        // costs nothing either — the grace model already forgives the day.
+        set({ sessions, active: null, player: defaultPlayer() });
+        return stopped;
+      },
+
+      skipPose: () => {
+        const s = get();
+        if (!s.active) return null;
+        const practice = s.practices.find((p) => p.id === s.active!.practiceId);
+        const poses = practice?.poses ?? [];
+        if (poses.length === 0) return null;
+
+        const at = poseAt(poses, s.player.poseExtensions, s.active.elapsed + s.player.poseSkipSeconds);
+        if (!at || at.finished) return null;
+
+        // Skipping = winding the pose clock forward to the next boundary, so the
+        // sequence stays a pure function of time and nothing has to be stepped.
+        const secondsSkipped = Math.max(1, Math.ceil(at.remaining));
+        set({ player: { ...s.player, poseSkipSeconds: s.player.poseSkipSeconds + secondsSkipped } });
+        return { from: at.pose, to: poses[at.index + 1] ?? null, secondsSkipped };
+      },
+
+      tick: (seconds = 1) =>
         set((s) => {
+          // A paused timer must not advance, and `elapsed` must survive the
+          // pause untouched — the player reads it straight back for display.
           if (!s.active || s.active.paused) return {};
           const step = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
           return { active: { ...s.active, elapsed: s.active.elapsed + step } };
@@ -502,7 +908,13 @@ export const useStore = create<Store>()(
 
         const habit = recordSession(s.habit, { day, seconds, today: dayKey(now) });
         const next: AppState = { ...s, sessions, habit, active: null };
-        set({ sessions, habit, active: null, achievements: withAchievements(next, now) });
+        set({
+          sessions,
+          habit,
+          active: null,
+          player: defaultPlayer(),
+          achievements: withAchievements(next, now),
+        });
         return finished;
       },
 
@@ -559,10 +971,24 @@ export const useStore = create<Store>()(
 
       setName: (name) => set((s) => ({ settings: { ...s.settings, name: String(name).slice(0, 60) } })),
 
+      setProfileName: (name) => get().setName(name),
+
+      setAccessibility: (patch) =>
+        set((s) => ({
+          settings:
+            typeof patch.reduceMotion === 'boolean'
+              ? { ...s.settings, reduceMotion: patch.reduceMotion }
+              : s.settings,
+          muted: typeof patch.muted === 'boolean' ? patch.muted : s.muted,
+        })),
+
       setReminder: (hhmm) =>
         set((s) => ({
           settings: { ...s.settings, reminderAt: /^\d{2}:\d{2}$/.test(hhmm) ? hhmm : '' },
         })),
+
+      updateSettings: (patch) =>
+        set((s) => ({ settings: sanitizeSettings({ ...s.settings, ...patch }, s.settings) })),
 
       addBreathPattern: (pattern) => {
         const cycle = Math.max(1, pattern.inhale + pattern.holdIn + pattern.exhale + pattern.holdOut);
@@ -590,9 +1016,39 @@ export const useStore = create<Store>()(
           return { habit, achievements: withAchievements({ ...s, habit }, now) };
         }),
 
-      reset: () => {
+      dangerouslyResetAll: () => {
+        // defaultAppState(), not firstRunState(): after someone deliberately
+        // erases their history, repopulating the app with demo sessions would
+        // look like the wipe had failed.
         const fresh = defaultAppState();
-        set({ ...fresh, achievements: withAchievements(fresh, nowIso()), _recovered: false });
+        set({
+          ...fresh,
+          achievements: withAchievements(fresh, nowIso()),
+          // The shell goes back to its opening state too, so the screen the user
+          // is left looking at matches the data they just erased.
+          view: 'today',
+          libraryFilter: defaultLibraryFilter(),
+          player: defaultPlayer(),
+          muted: false,
+          _recovered: false,
+        });
+      },
+
+      reset: () => get().dangerouslyResetAll(),
+
+      exportJSON: () => {
+        const s = get();
+        return JSON.stringify(
+          {
+            app: 'yoganext',
+            key: STORAGE_KEY,
+            version: STATE_VERSION,
+            exportedAt: nowIso(),
+            state: toPersisted(s),
+          },
+          null,
+          2,
+        );
       },
 
       acknowledgeRecovery: () => set({ _recovered: false }),
@@ -602,17 +1058,7 @@ export const useStore = create<Store>()(
       version: STATE_VERSION,
       storage: safeStorage,
 
-      partialize: (s): PersistedState => ({
-        // Only user-authored practices. Persisting the seed library would freeze
-        // whatever shipped on the day of install and never update it again.
-        practices: s.practices.filter(isCustom),
-        sessions: s.sessions,
-        moods: s.moods,
-        habit: s.habit,
-        achievements: s.achievements,
-        active: s.active,
-        settings: s.settings,
-      }),
+      partialize: (s): PersistedState => toPersisted(s),
 
       /**
        * Forward migration. Version 0 (any pre-versioning blob) is shape-checked
@@ -653,6 +1099,12 @@ export const useStore = create<Store>()(
           settings: sanitizeSettings(p.settings),
         };
 
+        // An active session whose practice no longer exists is unreachable: the
+        // player has nothing to render, so the user can neither see it nor stop
+        // it, and `completeSession` is the only action that clears `active`.
+        // Better to drop it than to leave the app insisting a session is running.
+        merged.active = liveActive(merged.practices, merged.active);
+
         // Self-heal the caches. A tampered `streak: 9999` cannot survive this.
         const now = nowIso();
         merged.habit = reconcile(merged.habit, dayKey(now));
@@ -668,6 +1120,13 @@ export const useStore = create<Store>()(
           // the only safe one here: for synchronous storage this callback runs
           // *during* `create()`, so `useStore` is still in its temporal dead
           // zone and referencing it would throw.
+          if (recovered) {
+            // The initial state carries the demo history, which is right for a
+            // first-time visitor and wrong for someone whose data we just
+            // failed to read — they would take the seeded sessions for their
+            // own recovered ones. Clear to a blank slate and say so.
+            Object.assign(state, defaultAppState());
+          }
           state._hydrated = true;
           state._recovered = recovered;
         } else {

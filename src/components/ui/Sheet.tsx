@@ -84,7 +84,7 @@ export function Sheet({ open, onClose, title, description, children, hideTitle }
           >
             <div
               aria-hidden="true"
-              className="mx-auto mb-5 h-1 w-10 rounded-full bg-white/15 sm:hidden"
+              className="mx-auto mb-5 h-1 w-10 rounded-full bg-fg/20 sm:hidden"
             />
             <div className="mb-4 flex items-start justify-between gap-4">
               <div className={hideTitle ? 'sr-only' : ''}>
@@ -101,7 +101,7 @@ export function Sheet({ open, onClose, title, description, children, hideTitle }
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
-                className="-mr-1 -mt-1 grid h-9 w-9 shrink-0 place-items-center rounded-full text-fg-muted transition-colors hover:bg-white/5 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="-mr-1 -mt-1 grid h-9 w-9 shrink-0 place-items-center rounded-full text-fg-muted transition-colors hover:bg-fg/5 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <X size={18} aria-hidden="true" />
               </button>

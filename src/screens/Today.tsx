@@ -12,7 +12,7 @@
 import { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowRight, Clock3, Flame, Sparkles, Wind } from 'lucide-react';
-import { useStore } from '../lib/store';
+import { callTool } from '../agent/tools';
 import type { MoodScore, Practice } from '../lib/types';
 import { Card, CardButton, SectionLabel } from '../components/ui/Card';
 import { Ring } from '../components/ui/Ring';
@@ -136,8 +136,6 @@ const item = {
 
 export default function Today() {
   const state = useAppState();
-  const startSession = useStore((s) => s.startSession);
-  const logMood = useStore((s) => s.logMood);
   const insights = useInsights();
   const [justLogged, setJustLogged] = useState<MoodScore | null>(null);
 
@@ -194,7 +192,7 @@ export default function Today() {
           <CardButton
             featured
             pad="none"
-            onClick={() => startSession(suggestion.id)}
+            onClick={() => callTool('start_session', { practiceId: suggestion.id })}
             className="overflow-hidden"
           >
             {/* gradient field */}
@@ -268,7 +266,7 @@ export default function Today() {
                   aria-checked={active}
                   aria-label={`${label} (${score} of 5)`}
                   onClick={() => {
-                    logMood(score);
+                    callTool('log_mood', { score });
                     setJustLogged(score);
                   }}
                   whileHover={{ y: -3 }}
@@ -284,7 +282,7 @@ export default function Today() {
                     <motion.span
                       layoutId="mood-halo"
                       aria-hidden="true"
-                      className="absolute inset-0 -z-10 rounded-2xl bg-white/[0.07] ring-1 ring-white/10"
+                      className="absolute inset-0 -z-10 rounded-2xl bg-fg/[0.07] ring-1 ring-line"
                       transition={{ type: 'spring', stiffness: 420, damping: 34 }}
                     />
                   )}

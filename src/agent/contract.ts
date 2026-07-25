@@ -145,6 +145,91 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     input: { text: { type: 'string', description: 'the reflection', required: true } },
     mutates: true,
   },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // PARITY TOOLS. Added after a UI audit found ten things a user could do with a
+  // tap that an agent could not do at all — navigation, filtering, abandoning a
+  // session, "+1 minute", identity, reminders, accessibility, data export.
+  //
+  // An app where the GUI can do more than the tool surface is NOT agent-first;
+  // it is an ordinary app with a chat feature bolted on. `verifyUiParity()` now
+  // fails the build if a UI action has no tool.
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    name: 'navigate',
+    description:
+      'Move the user to a screen. Use when they ask to "see my progress", "show me the library", "open settings". The GUI follows the agent.',
+    input: {
+      view: { type: 'string', description: 'destination screen', enum: ['today', 'practice', 'progress', 'you'], required: true },
+    },
+    mutates: true,
+  },
+  {
+    name: 'filter_library',
+    description:
+      'Set the practice-library filters the user sees (kind and maximum length). Use when they say "show me only short breathwork". Pass null/omit to clear a filter.',
+    input: {
+      kind: { type: 'string', description: 'practice kind, omit for all', enum: ['meditation', 'breathwork', 'yoga', 'sleep', 'journal'] },
+      maxMinutes: { type: 'number', description: 'longest practice to show; omit for any length' },
+    },
+    mutates: true,
+  },
+  {
+    name: 'extend_session',
+    description:
+      'Add time to the practice in progress ("give me one more minute"). For yoga this also holds the current pose longer.',
+    input: { minutes: { type: 'number', description: 'minutes to add, default 1' } },
+    mutates: true,
+  },
+  {
+    name: 'abandon_session',
+    description:
+      'Stop the running practice WITHOUT recording it as completed. Use when the user needs to stop and should not be made to feel they failed. Never guilt them.',
+    input: { reason: { type: 'string', description: 'optional, stored privately' } },
+    mutates: true,
+  },
+  {
+    name: 'skip_pose',
+    description: 'Advance a yoga practice to the next pose (e.g. the current pose hurts).',
+    input: {},
+    mutates: true,
+  },
+  {
+    name: 'set_profile',
+    description: 'Set what the app calls the user. Used in the greeting.',
+    input: { name: { type: 'string', description: 'preferred name', required: true } },
+    mutates: true,
+  },
+  {
+    name: 'set_reminder',
+    description: 'Set or clear the daily practice reminder time.',
+    input: { time: { type: 'string', description: 'local time as HH:MM, or empty string to turn reminders off', required: true } },
+    mutates: true,
+  },
+  {
+    name: 'set_accessibility',
+    description:
+      'Adjust motion and sound for comfort. Use immediately if the user mentions motion sensitivity, nausea, migraine or vestibular issues.',
+    input: {
+      reduceMotion: { type: 'boolean', description: 'calm all animation' },
+      muted: { type: 'boolean', description: 'silence the soundscape' },
+    },
+    mutates: true,
+  },
+  {
+    name: 'export_data',
+    description:
+      'Return the user\'s complete data as JSON so they can keep or move it. Their data is theirs; never refuse this.',
+    input: {},
+    mutates: false,
+  },
+  {
+    name: 'reset_data',
+    description:
+      'Erase all sessions, moods and progress. DESTRUCTIVE and irreversible — you must get an explicit, unambiguous confirmation in the same turn before calling, and `confirm` must be true.',
+    input: { confirm: { type: 'boolean', description: 'must be true; refuse otherwise', required: true } },
+    mutates: true,
+  },
 ] as const;
 
 export type ToolName = (typeof TOOL_SPECS)[number]['name'];

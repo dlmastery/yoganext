@@ -9,14 +9,21 @@ can do that is to pretend to be a mouse — screen-scraping a DOM that was desig
 for eyes, breaking on every redesign, unable to tell you what it just did.
 
 Here the capability **is** the tool surface. `src/agent/contract.ts` declares
-thirteen typed, documented tools; `src/agent/tools.ts` implements them against
+twenty-four typed, documented tools; `src/agent/tools.ts` implements them against
 the store; and the React UI is *one client of that surface*, with no privileged
 path of its own. The rule that keeps it honest:
 
 > Do not add a feature to a component that is not reachable as a tool.
 
-An agent driving these thirteen tools reaches 100% of the product without
+An agent driving these twenty-four tools reaches 100% of the product without
 touching a pixel.
+
+That claim used to be aspirational. A UI audit — reading every React handler
+against the tool list — found **ten capabilities the GUI had and the tool surface
+did not**: navigation, library filters, "+1 min", abandoning a session, skipping
+a pose, your name, the reminder, reduce-motion, mute, export and reset. Fourteen
+tools became twenty-four, and every one of those handlers now calls the tool
+rather than the store. See [Parity](#parity-everything-you-can-tap-you-can-say).
 
 ---
 
@@ -26,24 +33,41 @@ touching a pixel.
 |---|---|---|
 | `list_practices` | — | Browse the library, filtered by `kind`, `maxMinutes`, `tag`. |
 | `recommend_practice` | — | Pick **one** practice for `mood` / `minutesAvailable` / `intent`, with the reasons it won. |
+| `get_progress` | — | Streak, best streak, grace days, total minutes, daily goal, recent sessions. |
+| `get_insights` | — | Observations derived from the user's own data, each carrying its `n`. |
+| `export_data` | — | The user's complete history as JSON. Their data is theirs; never refuse it. |
 | `start_session` | yes | Begin `practiceId`. The UI enters the immersive player. |
 | `pause_session` | yes | Pause the running practice. |
 | `resume_session` | yes | Resume a paused practice. |
+| `extend_session` | yes | Add `minutes` to the practice in progress; for yoga, also holds the current pose longer. |
+| `skip_pose` | yes | Advance a pose sequence to the next pose. |
 | `complete_session` | yes | Finish and record the session, optionally with `moodAfter` and a `note`. |
+| `abandon_session` | yes | Stop **without** recording a completion, with an optional private `reason`. No streak cost. |
 | `log_mood` | yes | Record a 1–5 `score` with optional `feelings[]` and `note`, independent of a session. |
-| `get_progress` | — | Streak, best streak, grace days, total minutes, daily goal, recent sessions. |
-| `get_insights` | — | Observations derived from the user's own data, each carrying its `n`. |
+| `journal_entry` | yes | Store a written reflection; returns the entry id. |
+| `navigate` | yes | Show a screen: `today` \| `practice` \| `progress` \| `you`. |
+| `filter_library` | yes | Set the library's `kind` and `maxMinutes` filters. An omitted field **clears** that filter. |
 | `set_intention` | yes | Set the daily goal in minutes (clamped to 3–60). |
 | `set_theme` | yes | `aurora` \| `dusk` \| `forest` \| `sand`. |
 | `set_soundscape` | yes | `none` \| `rain` \| `ocean` \| `forest` \| `singing-bowl`. |
+| `set_profile` | yes | The `name` used in the greeting. An empty string clears it. |
+| `set_reminder` | yes | Daily reminder `time` as `HH:MM`; an empty string turns it off. |
+| `set_accessibility` | yes | `reduceMotion` and/or `muted`. Use immediately on any mention of motion sickness or vertigo. |
 | `create_breath_pattern` | yes | Save a custom pattern (`inhale`/`holdIn`/`exhale`/`holdOut` in seconds). |
-| `journal_entry` | yes | Store a written reflection; returns the entry id. |
+| `reset_data` | yes | Erase everything. Refuses unless `confirm === true`. |
 
-Nine tools write, four read. The split matters to an agent: the read tools are
-safe to call unprompted to *find out* something, and the write tools should be
-confirmed with the user first. The manifest encodes this — since neither vendor's
-tool schema permits custom top-level keys, the `mutates` flag is folded into the
-description text, where the model will actually read it.
+Nineteen tools write, five read. The split matters to an agent: the read tools
+are safe to call unprompted to *find out* something, and the write tools should
+be confirmed with the user first. The manifest encodes this — since neither
+vendor's tool schema permits custom top-level keys, the `mutates` flag is folded
+into the description text, where the model will actually read it.
+
+Two of the write tools carry extra weight. `reset_data` is the only irreversible
+call on the surface and it **fails** unless `confirm: true`; the refusal message
+is written as a script, so an agent asking for permission says what is actually
+lost rather than a vague "are you sure?". And `abandon_session` exists so an
+agent never has to choose between logging a false completion and leaving a
+session hanging — someone who needs to stop should be able to stop.
 
 ### Three guarantees every tool makes
 
@@ -125,6 +149,94 @@ to, which is precisely the failure this architecture exists to prevent.
 `npm run agent:tools` runs the check and exits non-zero if the surface has
 drifted.
 
+But coverage compares the contract **to itself**. It was green — fourteen for
+fourteen — while ten things a user could tap had no tool at all, because a
+capability that never reached `contract.ts` is invisible to a check that starts
+from `contract.ts`. So there is a second check.
+
+---
+
+## Parity: everything you can tap, you can say
+
+`verifyUiParity()` in `src/agent/manifest.ts` holds `UI_CAPABILITIES`: an
+inventory of every user-visible action and the tool that serves it. It asserts
+each one resolves to a tool that is both declared and implemented.
+
+```bash
+npm run verify:agent    # coverage + parity; exits non-zero on failure
+```
+
+```
+ok: true
+
+coverage  24/24 tools implemented
+parity    25/25 UI capabilities resolve to a tool
+          19/24 tools are reachable from the GUI
+
+Everything you can tap, you can say.
+```
+
+The list is hand-maintained on purpose. Deriving it from the source would only
+prove that whatever the UI does is what it should do; a human writing down "the
+user can do this here" is the actual check. Add a control, add a row — and if
+that row has no tool, the build fails.
+
+| You tap | Where | Tool |
+|---|---|---|
+| A tab in the bottom bar or side rail | `App.tsx` | `navigate` |
+| "Session paused — resume" | `App.tsx` | `resume_session` |
+| "Begin" on today's suggestion | `screens/Today.tsx` | `start_session` |
+| A mood face on the check-in row | `screens/Today.tsx` | `log_mood` |
+| The practice grid itself | `screens/Practice.tsx` | `list_practices` |
+| A kind or length chip | `screens/Practice.tsx` | `filter_library` |
+| "Clear filters" | `screens/Practice.tsx` | `filter_library` |
+| A practice card | `screens/Practice.tsx` | `start_session` |
+| The streak, totals and calendar | `screens/Progress.tsx` | `get_progress` |
+| The observations panel | `screens/Progress.tsx` | `get_insights` |
+| The play/pause button, or space | `player/SessionPlayer.tsx` | `pause_session` / `resume_session` |
+| "+1 min" | `player/SessionPlayer.tsx` | `extend_session` |
+| The speaker icon | `player/SessionPlayer.tsx` | `set_accessibility` |
+| X, or Escape (the session parks, paused) | `player/SessionPlayer.tsx` | `pause_session` |
+| "Finish" → the mood check-in → "Save" | `player/SessionPlayer.tsx` | `complete_session` |
+| "Hold longer" on a pose | `player/PoseSequencer.tsx` | `extend_session` |
+| Your name | `screens/You.tsx` | `set_profile` |
+| A theme swatch | `screens/You.tsx` | `set_theme` |
+| A soundscape chip | `screens/You.tsx` | `set_soundscape` |
+| The daily-goal stepper or a preset | `screens/You.tsx` | `set_intention` |
+| The reminder switch or its time field | `screens/You.tsx` | `set_reminder` |
+| "Reduce motion" | `screens/You.tsx` | `set_accessibility` |
+| "Export JSON" | `screens/You.tsx` | `export_data` |
+| "Reset everything" → "Yes, delete it all" | `screens/You.tsx` | `reset_data` |
+
+Read that table as a claim about the *code*: those handlers call `callTool(...)`,
+not the store. The store action is no longer reachable from a component for any
+of these. (The three read rows — the practice grid, the streak panel, the
+observations panel — are the exception and are marked as such in the source:
+those screens render straight from the store, and the row records that the tool
+returns the same thing the screen shows.)
+
+Two deliberate consequences:
+
+**`tick` is not a tool.** The session clock fires once a second and is not
+something a person asks for. It is plumbing, and it stays a direct store call.
+Everything a user could *say* is a tool; the clock is not one of them.
+
+**The length filter changed shape.** It used to offer bands — "5–15 min", "Over
+15 min" — which read nicely and could not be expressed by `filter_library`, whose
+argument is a `maxMinutes` ceiling. A control only the GUI can operate is exactly
+the asymmetry this document is about, so the bands became ceilings: "Up to 5 /
+15 / 30 min". Each chip is now one tool call, and it is closer to the question
+people actually ask.
+
+### The reverse direction is fine
+
+Five tools have no GUI control at all: `recommend_practice`, `create_breath_pattern`,
+`journal_entry`, `abandon_session` and `skip_pose`. That is not a gap — it is the
+point. The agent being *more* capable than the screens is the direction an
+agent-first app is supposed to lean; the screens being more capable than the
+agent is the one that breaks the thesis. `verifyUiParity` reports these as
+`agentOnly` and passes.
+
 ---
 
 ## The on-device coach
@@ -153,60 +265,87 @@ The console renders that absence explicitly rather than hiding it.
 
 ## A worked transcript
 
+Verbatim output from the on-device coach, run against the seeded library.
+
 > **you** — I'm anxious and have 10 minutes
 
-Read `mood ~2`, `10 min available`, `intent "calm"` from the message.
+*Read `mood ~2`, `10 min available`, `intent "calm"` from the message.*
 
 ```
-recommend_practice  reads                                    ✓
+recommend_practice   reads   ✓
 { "mood": 2, "minutesAvailable": 10, "intent": "calm" }
-→ "Because you are low and you have 10 minutes and you want calm, I would do
-   Settling Breath — 8 min of breathwork, gentle. …
-   Why this one: fits your 10 minutes (8 min); tagged anxiety, calm; gentle
-   enough for a low day. Say 'start it' and I will begin."
+
+→ Because you are low and you have 10 minutes and you want calm, I would do
+  **Feet on the Floor** — 5 min of meditation, gentle. when the room starts
+  going somewhere without you
+
+  Why this one: fits your 10 minutes (5 min); tagged anxiety, calm; gentle
+  enough for a low day; breath and stillness settle the nervous system
+  fastest; something you have not done lately.
+
+  Say "start it" and I will begin.
 ```
 
 > **you** — start it
 
-Resolved *"it"* to the practice last recommended.
+*Resolved "it" to the practice I last recommended.*
 
 ```
-start_session  writes                                        ✓
-{ "practiceId": "settling-breath" }
-→ "Starting Settling Breath — 8 minutes of breathwork. The player is open;
-   I will stay quiet until you finish."
+start_session   writes   ✓
+{ "practiceId": "med-ground-panic" }
+
+→ Starting **Feet on the Floor** — 5 minutes of meditation. The player is
+  open; I will stay quiet until you finish.
 ```
 
 > **you** — done, feeling 4
 
-Asked to finish, with mood 4 attached.
+*Asked to finish, with mood 4 attached.*
 
 ```
-complete_session  writes                                     ✓
+complete_session   writes   ✓
 { "moodAfter": 4 }
-→ "Logged Settling Breath — 8 min. That is 3 days in a row. You logged feeling
-   good afterwards."
+
+→ Logged **Feet on the Floor** — under a minute. That is 1 day in a row.
+  You logged feeling good afterwards.
 ```
+
+Note what it did *not* say. The session ran for seconds, so it reports "under a
+minute" rather than rounding up to "1 min" — the sentence has to agree with the
+ledger, or the praise is worthless.
 
 > **you** — what have you noticed about me?
 
 ```
-get_insights  reads                                          ✓
+get_insights   reads   ✓
 {}
-→ "- breathwork lifts your mood +1.2 on average (n=6), ahead of yoga +0.4.
-   - 62% of your practice happens in the evening — that is where the habit is
-     actually sticking."
+
+→ - You have practised today. Best so far: 1 day. You have a grace day in hand
+    this week. (confidence: high)
+  - Your mood is 1.2 points higher after breathwork. Across 5 sessions where
+    you logged mood before and after: 2.4 → 3.6 on the 1–5 scale. This is an
+    association in your own data, not a cause. (confidence: medium)
+  - You finish what you start in late at night. 67% of the 6 sessions you began
+    in that window were completed. Other windows have fewer than 5 sessions, so
+    they are not yet comparable. (confidence: medium)
 ```
+
+Every claim carries its `n` and its confidence, and the causal disclaimer is
+part of the sentence rather than a footnote. `get_insights` delegates to
+`src/lib/insights.ts` rather than deriving anything itself — a second
+derivation living in the tool layer is how an app ends up telling the user two
+different truths.
 
 > **you** — make it nicer
 
-No rule matched with enough confidence to act.
+*No rule matched with enough confidence to act.*
 
 ```
 no tool called
-→ "I am not sure what you need yet — and I would rather ask than guess. Tell me
-   one of: how you feel (1-5 or in words), how many minutes you have, or what
-   you want to change."
+
+→ I am not sure what you need yet — and I would rather ask than guess. Tell me
+  one of: how you feel (1-5 or in words), how many minutes you have, or what
+  you want to change. You can also say "what can you do".
 ```
 
 Every one of those blocks is what the console actually renders: the tool name, a

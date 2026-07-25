@@ -32,24 +32,42 @@ import { Angry, Check, Frown, Laugh, Meh, Pause, Play, Plus, Smile, Volume2, Vol
 import clsx from 'clsx';
 import type { ActiveSession, MoodScore, Practice, Settings } from '../../lib/types';
 import { useStore } from '../../lib/store';
+import type { PlayerState } from '../../lib/store';
+import { callTool } from '../../agent/tools';
 import { BREATH_EASE, BreathOrb, breathSegments, phaseAt } from './BreathOrb';
 import { PoseSequencer } from './PoseSequencer';
 import { Soundscape } from './Soundscape';
-import { formatClock, spokenClock, useSessionTimer } from './useSessionTimer';
+import { mmss } from '../../lib/format';
+import { spokenClock, useSessionTimer } from './useSessionTimer';
 
 export interface SessionPlayerProps {
   /** Called when the user leaves the player. The session is paused, not discarded. */
   onExit?: () => void;
 }
 
+/**
+ * How much longer "Hold longer" holds a pose. Sent to `extend_session` as a
+ * fraction of a minute — the tool's unit is minutes because that is what people
+ * say ("give me another minute"), and it floors at five seconds so a quarter of
+ * a minute cannot round away to nothing.
+ */
+const HOLD_LONGER_SECONDS = 15;
+
+/**
+ * Every transport control below goes through `callTool`, not through the store.
+ * Pause, resume, "+1 min", mute and finish are all things a user can ask for in
+ * words, so they must be the same call either way — otherwise the player would
+ * be a privileged path, and the tool surface a partial copy of it. `tick` is the
+ * one exception and deliberately so: it is the clock, not a capability, and it
+ * fires once a second.
+ */
 export function SessionPlayer({ onExit }: SessionPlayerProps) {
   // The only store coupling in this file. If the store's shape moves, it moves here.
   const active = useStore((s) => s.active);
   const practices = useStore((s) => s.practices);
   const settings = useStore((s) => s.settings);
-  const pauseSession = useStore((s) => s.pauseSession);
-  const resumeSession = useStore((s) => s.resumeSession);
-  const completeSession = useStore((s) => s.completeSession);
+  const player = useStore((s) => s.player);
+  const muted = useStore((s) => s.muted);
   const tick = useStore((s) => s.tick);
 
   const practice = active ? practices.find((p) => p.id === active.practiceId) : undefined;
@@ -57,15 +75,25 @@ export function SessionPlayer({ onExit }: SessionPlayerProps) {
 
   return (
     <PlayerStage
-      // Remounting on a new session resets the clock, the bonus time and the
-      // check-in in one move, instead of six reset effects.
+      // Remounting on a new session resets the clock and the check-in in one
+      // move, instead of several reset effects. Bonus time and pose extensions
+      // live in the store now, and `start_session` clears them there.
       key={active.startedAt}
       active={active}
       practice={practice}
       settings={settings}
-      onPause={pauseSession}
-      onResume={resumeSession}
-      onComplete={completeSession}
+      player={player}
+      muted={muted}
+      onPause={() => void callTool('pause_session')}
+      onResume={() => void callTool('resume_session')}
+      onComplete={(moodAfter, note) =>
+        void callTool('complete_session', {
+          ...(moodAfter === undefined ? {} : { moodAfter }),
+          ...(note === undefined ? {} : { note }),
+        })
+      }
+      onExtend={(minutes) => void callTool('extend_session', { minutes })}
+      onMute={(next) => void callTool('set_accessibility', { muted: next })}
       onTick={tick}
       onExit={onExit}
     />
@@ -76,9 +104,14 @@ interface PlayerStageProps {
   active: ActiveSession;
   practice: Practice;
   settings: Settings;
+  player: PlayerState;
+  muted: boolean;
   onPause: () => void;
   onResume: () => void;
   onComplete: (moodAfter?: MoodScore, note?: string) => void;
+  /** Fractional minutes are expected — "hold this pose longer" sends a quarter. */
+  onExtend: (minutes: number) => void;
+  onMute: (muted: boolean) => void;
   onTick: (seconds: number) => void;
   onExit?: () => void;
 }
@@ -87,16 +120,18 @@ function PlayerStage({
   active,
   practice,
   settings,
+  player,
+  muted,
   onPause,
   onResume,
   onComplete,
+  onExtend,
+  onMute,
   onTick,
   onExit,
 }: PlayerStageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [bonusSeconds, setBonusSeconds] = useState(0);
   const [checkIn, setCheckIn] = useState(false);
-  const [muted, setMuted] = useState(false);
 
   const reduceMotion = settings.reduceMotion;
   const paused = active.paused;
@@ -108,7 +143,7 @@ function PlayerStage({
     onTick,
   });
 
-  const total = practice.minutes * 60 + bonusSeconds;
+  const total = practice.minutes * 60 + player.bonusSeconds;
   const remaining = Math.max(0, total - elapsed);
   const progress = total > 0 ? Math.min(1, elapsed / total) : 0;
 
@@ -242,7 +277,7 @@ function PlayerStage({
 
         <IconButton
           label={soundOn ? 'Mute ambience' : 'Unmute ambience'}
-          onClick={() => setMuted((m) => !m)}
+          onClick={() => onMute(!muted)}
           disabled={settings.soundscape === 'none'}
           pressed={soundOn}
         >
@@ -256,10 +291,13 @@ function PlayerStage({
           {practice.poses && practice.poses.length > 0 ? (
             <PoseSequencer
               poses={practice.poses}
-              elapsed={elapsed}
+              // The pose clock runs ahead of the session clock by whatever
+              // `skip_pose` has wound forward, so a skip is just time travel.
+              elapsed={elapsed + player.poseSkipSeconds}
               reduceMotion={reduceMotion}
               colors={practice.gradient}
-              onExtend={(seconds) => setBonusSeconds((b) => b + seconds)}
+              extensions={player.poseExtensions}
+              onHoldLonger={() => onExtend(HOLD_LONGER_SECONDS / 60)}
             />
           ) : practice.breath ? (
             <BreathOrb
@@ -297,14 +335,14 @@ function PlayerStage({
       {/* ── transport ──────────────────────────────────────────────────────── */}
       <footer className="relative z-10 flex flex-col items-center gap-5 px-6 pb-8 sm:pb-10">
         <div className="flex w-full max-w-xs items-baseline justify-between text-xs font-light tabular-nums tracking-[0.18em] text-fg-muted">
-          <span aria-label={`${spokenClock(elapsed)} elapsed`}>{formatClock(elapsed)}</span>
-          <span aria-label={`${spokenClock(remaining)} remaining`}>−{formatClock(remaining)}</span>
+          <span aria-label={`${spokenClock(elapsed)} elapsed`}>{mmss(elapsed)}</span>
+          <span aria-label={`${spokenClock(remaining)} remaining`}>−{mmss(remaining)}</span>
         </div>
 
         <div className="flex items-center gap-6">
           <TextButton
             label={`Add one minute. ${spokenClock(remaining + 60)} would remain.`}
-            onClick={() => setBonusSeconds((b) => b + 60)}
+            onClick={() => onExtend(1)}
           >
             <Plus className="h-3.5 w-3.5" aria-hidden />
             1 min

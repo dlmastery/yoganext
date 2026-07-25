@@ -39,10 +39,18 @@ export function Stat({ label, value, unit, hint, icon, className }: StatProps) {
 
 export type Confidence = 'low' | 'medium' | 'high';
 
+/**
+ * Two sets of tints, not one. The `-200` shades read beautifully on the three
+ * dark palettes and are almost invisible on the light `sand` one — and this is
+ * the badge that qualifies every claim the app makes about a person's own
+ * wellbeing, so "hard to read in one theme" is not an acceptable failure mode.
+ * Base = light theme; `dark:` = the three dark palettes (see tailwind darkMode).
+ */
 const confidenceStyle: Record<Confidence, string> = {
-  low: 'border-amber-400/25 bg-amber-400/10 text-amber-200/90',
-  medium: 'border-sky-400/25 bg-sky-400/10 text-sky-200/90',
-  high: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200/90',
+  low: 'border-amber-700/30 bg-amber-500/15 text-amber-800 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200/90',
+  medium:
+    'border-sky-700/30 bg-sky-500/15 text-sky-800 dark:border-sky-400/25 dark:bg-sky-400/10 dark:text-sky-200/90',
+  high: 'border-emerald-700/30 bg-emerald-500/15 text-emerald-800 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-200/90',
 };
 
 const confidenceTitle: Record<Confidence, string> = {

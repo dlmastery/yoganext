@@ -17,7 +17,7 @@ export type CardTone = 'glass' | 'strong' | 'bare';
 const toneClass: Record<CardTone, string> = {
   glass: 'glass',
   strong: 'glass-strong',
-  bare: 'bg-bg-elev border border-white/5',
+  bare: 'bg-bg-elev border border-line',
 };
 
 const padClass = {
@@ -74,11 +74,13 @@ export const CardButton = forwardRef<HTMLButtonElement, CardButtonProps>(functio
       className={clsx(
         'group relative w-full rounded-3xl text-left',
         'outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
-        'shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset] transition-shadow duration-300',
-        'hover:shadow-[0_18px_50px_-24px_rgba(0,0,0,0.85)]',
+        // Arbitrary values must not contain spaces — Tailwind drops the whole
+        // class if they do. Hence `rgb(var(--fg)/0.07)`, not `rgb(var(--fg) / 0.07)`.
+        'shadow-[0_1px_0_0_rgb(var(--fg)/0.07)_inset] transition-shadow duration-300',
+        'hover:shadow-[0_18px_50px_-24px_rgb(0_0_0/0.5)]',
         toneClass[tone],
         padClass[pad],
-        featured && 'ring-1 ring-white/10',
+        featured && 'ring-1 ring-line',
         className,
       )}
       {...rest}

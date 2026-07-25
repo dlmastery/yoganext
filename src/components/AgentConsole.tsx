@@ -23,6 +23,7 @@ import {
   Terminal,
   X,
 } from 'lucide-react';
+import { useStore } from '../lib/store.ts';
 import { respond, SUGGESTED_PROMPTS } from '../agent/local-agent.ts';
 import type { AgentToolCall, CoachContext } from '../agent/local-agent.ts';
 import { toolMutates } from '../agent/tools.ts';
@@ -158,7 +159,11 @@ export default function AgentConsole({ open, onClose }: AgentConsoleProps) {
   const nextId = useRef(1);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const reduce = useReducedMotion();
+  // Honour BOTH the OS preference and the app's own toggle. Respecting only the
+  // system setting would silently ignore a choice the user made in Settings.
+  const systemReduce = useReducedMotion();
+  const appReduce = useStore((s) => s.settings.reduceMotion);
+  const reduce = systemReduce || appReduce;
 
   const mutatingCount = useMemo(() => TOOL_SPECS.filter((t) => t.mutates).length, []);
 

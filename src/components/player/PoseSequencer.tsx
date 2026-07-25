@@ -1,15 +1,20 @@
 /**
  * PoseSequencer — the yoga counterpart to BreathOrb.
  *
- * The sequence is *derived*, never stepped. Given the session clock we compute
- * which pose we are in from cumulative offsets, so auto-advance is a consequence of
- * the arithmetic rather than a timer that can fall out of sync with the session, and
- * a backgrounded tab returns to the correct pose rather than to a stale one.
+ * The sequence is *derived*, never stepped: `poseAt` walks cumulative offsets from
+ * the session clock, so auto-advance is arithmetic rather than a timer that can fall
+ * out of sync, and a backgrounded tab returns to the correct pose rather than a
+ * stale one.
  *
- * "Hold longer" is the one piece of local state, and it is the reason offsets are
- * recomputed rather than precomputed: extending the current pose has to push every
- * later boundary out by the same amount. Extensions are keyed by pose index, so a
- * pose the user has already left cannot be retroactively lengthened.
+ * That walk lives in `lib/store.ts`, not here, and this component imports it. The
+ * `skip_pose` action and this sequencer have to agree exactly on where the current
+ * pose ends — two copies of the loop would eventually be two answers to "how much
+ * is left".
+ *
+ * This component is CONTROLLED. Extensions arrive as a prop and "hold longer" is a
+ * callback, because under the agent-first contract every user-reachable behaviour
+ * has to be a tool: if the extension lived in local state here, an agent asking to
+ * hold a pose longer could not reach it, and the GUI would become a privileged path.
  *
  * The glyph token is documented as "simple svg path/emoji". We sniff it: a string
  * that starts with a path command and contains digits is rendered as SVG geometry,
@@ -17,63 +22,25 @@
  * blank frame.
  */
 
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Check, Plus } from 'lucide-react';
 import clsx from 'clsx';
 import type { Pose } from '../../lib/types';
-import { formatClock } from './useSessionTimer';
-
-const EXTEND_SECONDS = 15;
+import { poseAt } from '../../lib/store';
+import { mmss } from '../../lib/format';
 
 export interface PoseSequencerProps {
   poses: Pose[];
-  /** Session seconds. */
+  /** Session seconds, already wound forward by any `skip_pose`. */
   elapsed: number;
   reduceMotion?: boolean;
   colors?: [string, string];
-  /**
-   * Called when the user extends a pose, so the player can grow the session length
-   * to match. The sequencer tracks its own offsets regardless.
-   */
-  onExtend?: (seconds: number) => void;
+  /** Seconds added per pose index, owned by the store so `extend_session` reaches it. */
+  extensions: Record<number, number>;
+  /** Extends the CURRENT pose. The store decides by how much and by which index. */
+  onHoldLonger: () => void;
   className?: string;
-}
-
-interface SequenceState {
-  index: number;
-  pose: Pose;
-  duration: number;
-  elapsedInPose: number;
-  remaining: number;
-  progress: number;
-  /** true once the clock has run past the end of the last pose */
-  finished: boolean;
-}
-
-function resolve(poses: Pose[], extensions: number[], t: number): SequenceState {
-  const time = Math.max(0, t);
-  let cursor = 0;
-
-  for (let i = 0; i < poses.length; i++) {
-    const duration = Math.max(1, poses[i].seconds + (extensions[i] ?? 0));
-    if (time < cursor + duration || i === poses.length - 1) {
-      const elapsedInPose = Math.min(Math.max(time - cursor, 0), duration);
-      return {
-        index: i,
-        pose: poses[i],
-        duration,
-        elapsedInPose,
-        remaining: Math.max(0, duration - elapsedInPose),
-        progress: elapsedInPose / duration,
-        finished: i === poses.length - 1 && time >= cursor + duration,
-      };
-    }
-    cursor += duration;
-  }
-
-  // Only reachable for an empty pose list, which the component guards against.
-  throw new Error('PoseSequencer: empty pose list');
 }
 
 export function PoseSequencer({
@@ -81,26 +48,11 @@ export function PoseSequencer({
   elapsed,
   reduceMotion = false,
   colors,
-  onExtend,
+  extensions,
+  onHoldLonger,
   className,
 }: PoseSequencerProps) {
-  const [extensions, setExtensions] = useState<number[]>(() => poses.map(() => 0));
-
-  const state = useMemo(() => {
-    if (poses.length === 0) return null;
-    return resolve(poses, extensions, elapsed);
-  }, [poses, extensions, elapsed]);
-
-  const holdLonger = useCallback(() => {
-    if (!state) return;
-    setExtensions((prev) => {
-      const next = prev.length === poses.length ? [...prev] : poses.map(() => 0);
-      next[state.index] = (next[state.index] ?? 0) + EXTEND_SECONDS;
-      return next;
-    });
-    onExtend?.(EXTEND_SECONDS);
-  }, [state, poses, onExtend]);
-
+  const state = poseAt(poses, extensions, elapsed);
   if (!state) return null;
 
   // Theme tokens are RGB triplets, not colors — see BreathOrb.
@@ -152,7 +104,7 @@ export function PoseSequencer({
         </AnimatePresence>
 
         <div className="pointer-events-none absolute bottom-[4%] text-sm font-light tabular-nums tracking-[0.2em] text-fg-muted">
-          {formatClock(state.remaining)}
+          {mmss(state.remaining)}
         </div>
       </div>
 
@@ -162,9 +114,9 @@ export function PoseSequencer({
 
       <button
         type="button"
-        onClick={holdLonger}
+        onClick={onHoldLonger}
         className="glass flex items-center gap-2 rounded-full px-4 py-2 text-xs font-light tracking-[0.14em] text-fg-muted uppercase transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        aria-label={`Hold ${state.pose.name} for ${EXTEND_SECONDS} more seconds`}
+        aria-label={`Hold ${state.pose.name} longer`}
       >
         <Plus className="h-3.5 w-3.5" aria-hidden />
         Hold longer
@@ -188,7 +140,7 @@ export function PoseSequencer({
             >
               <span className="truncate text-xs font-light tracking-wide text-fg">{pose.name}</span>
               <span className="text-[0.65rem] tabular-nums tracking-[0.14em] text-fg-muted uppercase">
-                {current ? 'Now' : formatClock(seconds)}
+                {current ? 'Now' : mmss(seconds)}
               </span>
             </li>
           );

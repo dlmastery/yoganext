@@ -166,6 +166,150 @@ export interface CoverageReport {
  */
 let registered: readonly string[] | null = null;
 
+// ─────────────────────────────────────────────────────────────── UI parity ──
+
+export interface UiCapability {
+  /** stable id, used in the failure output */
+  id: string;
+  /** where it lives, so a reviewer can go and check the claim */
+  surface: string;
+  /** what the user actually does */
+  label: string;
+  /** the tool that provides it */
+  tool: string;
+}
+
+/**
+ * Every capability the GUI exposes, and the tool behind it.
+ *
+ * This list is the honest half of the agent-first claim. `verifyToolCoverage`
+ * compares the contract to itself, so it stays green while the GUI quietly grows
+ * a button no tool can press — which is exactly how a parity gap goes unnoticed.
+ * This inventory is what makes that failure visible.
+ *
+ * It is hand-maintained BY DESIGN. Deriving it from the source would only prove
+ * that whatever the UI happens to do is what it should do; a human writing down
+ * "the user can do X here" is the actual check. Add a row whenever you add a
+ * control, and `npm run verify:agent` will tell you if it has no tool.
+ *
+ * Two kinds of row, verified differently — do not conflate them:
+ *
+ *   WRITE rows (every mutating tool below) are backed by a literal `callTool(...)`
+ *   call site in the named file. These are checked: App.tsx -> navigate,
+ *   resume_session; Practice.tsx -> filter_library, start_session; Today.tsx ->
+ *   start_session, log_mood; SessionPlayer.tsx -> pause/resume/complete/extend +
+ *   set_accessibility; You.tsx -> the six settings tools, export_data, reset_data.
+ *
+ *   READ rows (`practice.browse`, `progress.read`, `progress.insights`) are NOT
+ *   call sites. Those screens render straight from the store and `lib/insights.ts`,
+ *   which is the right thing for a React view to do — subscribing to state is
+ *   cheaper and more reactive than calling a tool for data. They are listed
+ *   because the parity question is "can the GUI surface something the agent
+ *   cannot reach", and the answer must be no for reads as well as writes: the
+ *   named tool is the agent's route to the same information.
+ *
+ * One row is currently ASPIRATIONAL and is called out honestly rather than
+ * quietly counted: `player.pose-hold` names PoseSequencer.tsx, which as written
+ * contains no `callTool` at all. The row is kept because the control exists in
+ * the UI; it is the wiring that is missing. See the note on that row.
+ */
+export const UI_CAPABILITIES: readonly UiCapability[] = [
+  { id: 'shell.tabs', surface: 'App.tsx', label: 'Switch screen from the tab bar', tool: 'navigate' },
+  { id: 'shell.resume-parked', surface: 'App.tsx', label: 'Tap the "Session paused — resume" pill', tool: 'resume_session' },
+  { id: 'today.start-suggestion', surface: 'screens/Today.tsx', label: "Start today's suggested practice", tool: 'start_session' },
+  { id: 'today.mood-checkin', surface: 'screens/Today.tsx', label: 'Tap a 1-5 mood check-in', tool: 'log_mood' },
+  { id: 'practice.browse', surface: 'screens/Practice.tsx', label: 'Read the practice grid', tool: 'list_practices' },
+  { id: 'practice.filter', surface: 'screens/Practice.tsx', label: 'Filter the library by kind and length', tool: 'filter_library' },
+  { id: 'practice.filter-clear', surface: 'screens/Practice.tsx', label: 'Clear the library filters', tool: 'filter_library' },
+  { id: 'practice.start', surface: 'screens/Practice.tsx', label: 'Start a practice from its card', tool: 'start_session' },
+  { id: 'progress.read', surface: 'screens/Progress.tsx', label: 'Read the streak, totals and calendar', tool: 'get_progress' },
+  { id: 'progress.insights', surface: 'screens/Progress.tsx', label: 'Read the observations panel', tool: 'get_insights' },
+  { id: 'player.pause', surface: 'components/player/SessionPlayer.tsx', label: 'Pause the running practice', tool: 'pause_session' },
+  { id: 'player.resume', surface: 'components/player/SessionPlayer.tsx', label: 'Resume the running practice', tool: 'resume_session' },
+  { id: 'player.leave', surface: 'components/player/SessionPlayer.tsx', label: 'Leave the player (X or Escape) — the session parks, paused', tool: 'pause_session' },
+  { id: 'player.complete', surface: 'components/player/SessionPlayer.tsx', label: 'Finish and check in with a mood', tool: 'complete_session' },
+  { id: 'player.extend', surface: 'components/player/SessionPlayer.tsx', label: 'Add a minute to the practice', tool: 'extend_session' },
+  { id: 'player.mute', surface: 'components/player/SessionPlayer.tsx', label: 'Mute the ambience from the player', tool: 'set_accessibility' },
+  // ASPIRATIONAL: PoseSequencer.tsx has no callTool site yet, so this control is
+  // not actually wired to extend_session. Listed so the gap stays visible.
+  { id: 'player.pose-hold', surface: 'components/player/PoseSequencer.tsx', label: 'Hold the current pose longer', tool: 'extend_session' },
+  { id: 'you.theme', surface: 'screens/You.tsx', label: 'Change the palette', tool: 'set_theme' },
+  { id: 'you.soundscape', surface: 'screens/You.tsx', label: 'Change the ambient sound', tool: 'set_soundscape' },
+  { id: 'you.intention', surface: 'screens/You.tsx', label: 'Set the daily minute goal', tool: 'set_intention' },
+  { id: 'you.profile', surface: 'screens/You.tsx', label: 'Set the name used in the greeting', tool: 'set_profile' },
+  { id: 'you.reminder', surface: 'screens/You.tsx', label: 'Set or clear the daily reminder', tool: 'set_reminder' },
+  { id: 'you.accessibility', surface: 'screens/You.tsx', label: 'Reduce motion / mute for comfort', tool: 'set_accessibility' },
+  { id: 'you.export', surface: 'screens/You.tsx', label: 'Export all data as JSON', tool: 'export_data' },
+  { id: 'you.reset', surface: 'screens/You.tsx', label: 'Erase everything on this device', tool: 'reset_data' },
+] as const;
+
+export interface ParityReport {
+  ok: boolean;
+  /** capabilities that resolve to a declared AND implemented tool */
+  capabilityCount: number;
+  /** distinct tools the GUI can actually reach */
+  coveredTools: string[];
+  /** GUI capability pointing at a tool that is not in TOOL_SPECS */
+  undeclared: UiCapability[];
+  /** GUI capability whose tool is declared but has no implementation */
+  unimplemented: UiCapability[];
+  /** declared tools no GUI control reaches — agent-only, which is allowed */
+  agentOnly: string[];
+  summary: string;
+}
+
+/**
+ * Checks the direction that actually matters: can the GUI do anything the tool
+ * surface cannot? A capability whose tool is missing or unimplemented is a hole
+ * in the claim, and fails.
+ *
+ * The reverse — a tool with no GUI control — is fine and is reported as
+ * `agentOnly` rather than an error. The agent is allowed to be more capable than
+ * the screens; it is the screens being more capable that breaks the thesis.
+ */
+export function verifyUiParity(implemented?: readonly string[]): ParityReport {
+  const names = implemented ?? registered ?? [];
+  const impl = new Set(names);
+  const declared = new Set(TOOL_SPECS.map((t) => t.name));
+
+  const undeclared = UI_CAPABILITIES.filter((c) => !declared.has(c.tool));
+  const unimplemented = UI_CAPABILITIES.filter((c) => declared.has(c.tool) && !impl.has(c.tool));
+  const reachable = UI_CAPABILITIES.filter((c) => declared.has(c.tool) && impl.has(c.tool));
+
+  const coveredTools = [...new Set(reachable.map((c) => c.tool))].sort();
+  const agentOnly = [...declared].filter((n) => !coveredTools.includes(n)).sort();
+  const ok = undeclared.length === 0 && unimplemented.length === 0;
+
+  const parts: string[] = [];
+  if (undeclared.length) parts.push(`${undeclared.length} GUI control(s) point at a tool that does not exist`);
+  if (unimplemented.length) parts.push(`${unimplemented.length} GUI control(s) point at an unimplemented tool`);
+
+  return {
+    ok,
+    capabilityCount: reachable.length,
+    coveredTools,
+    undeclared,
+    unimplemented,
+    agentOnly,
+    summary: ok
+      ? `Every one of the ${UI_CAPABILITIES.length} GUI capabilities resolves to a working tool; ${agentOnly.length} further tool(s) are agent-only.`
+      : `GUI has capability the tool surface lacks — ${parts.join('; ')}.`,
+  };
+}
+
+export interface AgentFirstReport {
+  ok: boolean;
+  coverage: CoverageReport;
+  parity: ParityReport;
+}
+
+/** Both halves of the claim, for `npm run verify:agent`. */
+export function verifyAgentFirst(implemented?: readonly string[]): AgentFirstReport {
+  const coverage = verifyToolCoverage(implemented);
+  const parity = verifyUiParity(implemented);
+  return { ok: coverage.ok && parity.ok, coverage, parity };
+}
+
 export function registerImplementedTools(names: readonly string[]): void {
   registered = [...names];
 }

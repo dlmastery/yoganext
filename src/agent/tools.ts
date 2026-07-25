@@ -17,9 +17,10 @@
  *      boundary (see the `arg*` helpers) rather than trusted.
  */
 
-import { useApp } from '../lib/store.ts';
+import { useApp, VIEW_IDS } from '../lib/store.ts';
+import type { ViewId } from '../lib/store.ts';
 import { summarize } from '../lib/insights.ts';
-import { clamp } from '../lib/format.ts';
+import { clamp, humanMinutes } from '../lib/format.ts';
 import { TOOL_SPECS } from './contract.ts';
 import { registerImplementedTools } from './manifest.ts';
 import type { BreathPattern, MoodScore, Practice, PracticeKind, Settings, ToolResult } from '../lib/types.ts';
@@ -104,6 +105,48 @@ function argStrArray(args: ToolArgs, key: string): string[] {
   return [];
 }
 
+/**
+ * Booleans arrive as `true`, `"true"`, `"yes"`, `"on"` or `1` depending on the
+ * runtime. `undefined` means "not mentioned", which for a patch-style tool is
+ * meaningfully different from `false` — so this deliberately does not default.
+ */
+function argBool(args: ToolArgs, key: string): boolean | undefined {
+  const v = args[key];
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (['true', 'yes', 'y', 'on', '1'].includes(s)) return true;
+    if (['false', 'no', 'n', 'off', '0'].includes(s)) return false;
+  }
+  return undefined;
+}
+
+/**
+ * A string argument that is allowed to be EMPTY. `argStr` folds `''` into
+ * `undefined`, which is right for "you forgot to pass this" and wrong for
+ * "clear it" — `set_profile('')` and `set_reminder('')` both mean *unset*.
+ */
+function argRawStr(args: ToolArgs, key: string): string | undefined {
+  const v = args[key];
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  return undefined;
+}
+
+/** `"7:30"`, `"07:30"`, `"8pm"`, `"8:15 PM"` -> `"20:00"`. Undefined if unreadable. */
+function asClockTime(input: string): string | undefined {
+  const m = input.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\.?$/i);
+  if (!m) return undefined;
+  let hours = Number(m[1]);
+  const minutes = m[2] ? Number(m[2]) : 0;
+  const meridiem = m[3]?.toLowerCase();
+  if (meridiem === 'pm' && hours < 12) hours += 12;
+  if (meridiem === 'am' && hours === 12) hours = 0;
+  if (hours > 23 || minutes > 59) return undefined;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
 /** Pick one of a fixed set, case-insensitively. Returns undefined if no match. */
 function argEnum<T extends string>(args: ToolArgs, key: string, allowed: readonly T[]): T | undefined {
   const raw = argStr(args, key)?.toLowerCase();
@@ -113,6 +156,14 @@ function argEnum<T extends string>(args: ToolArgs, key: string, allowed: readonl
 
 /** Mood is deliberately coarse (1..5); round and clamp whatever we're handed. */
 const asMood = (n: number): MoodScore => clamp(Math.round(n), 1, 5) as MoodScore;
+
+/** What the user calls each screen. `navigate` reports the label, not the id. */
+const VIEW_LABEL: Record<ViewId, string> = {
+  today: 'Today',
+  practice: 'Practices',
+  progress: 'Progress',
+  you: 'You',
+};
 
 const THEMES = ['aurora', 'dusk', 'forest', 'sand'] as const;
 const SOUNDSCAPES = ['none', 'rain', 'ocean', 'forest', 'singing-bowl'] as const;
@@ -540,7 +591,10 @@ const impl: Record<string, ToolFn> = {
       why: argStr(args, 'why') ?? 'A custom rhythm.',
     };
 
-    state().addBreathPattern(pattern);
+    // The store wraps the pattern into a playable breathwork Practice and hands
+    // it back. Surface that id: without it an agent can create a pattern and
+    // then have no way to start the thing it just made.
+    const practice = state().addBreathPattern(pattern);
 
     const cycle = pattern.inhale + pattern.holdIn + pattern.exhale + pattern.holdOut;
     const shape = [pattern.inhale, pattern.holdIn, pattern.exhale, pattern.holdOut].join('-');
@@ -549,10 +603,10 @@ const impl: Record<string, ToolFn> = {
       pattern.exhale > pattern.inhale
         ? ' The exhale is longer than the inhale, which is what pulls you toward the parasympathetic side.'
         : '';
-    return ok(`Saved **${name}** (${shape}) — one cycle is ${cycle}s, about ${Math.round(60 / cycle)} breaths a minute.${note}`, {
-      pattern,
-      cycleSeconds: cycle,
-    });
+    return ok(
+      `Saved **${name}** (${shape}) — one cycle is ${cycle}s, about ${Math.round(60 / cycle)} breaths a minute.${note} It is now in your library as a ${practice.minutes}-minute practice; say the word and I will start it.`,
+      { pattern, cycleSeconds: cycle, practice: brief(practice) },
+    );
   },
 
   journal_entry: (args = {}) => {
@@ -564,6 +618,244 @@ const impl: Record<string, ToolFn> = {
       id,
       words,
     });
+  },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // PARITY TOOLS. Ten things a user could do with a tap and an agent could not
+  // do at all. Each one is now the ONLY path: the React handler behind the tap
+  // calls the tool below, so there is a single implementation to be right about
+  // and a single place the behaviour can drift from its description.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  navigate: (args = {}) => {
+    const view = argEnum(args, 'view', VIEW_IDS);
+    if (!view) {
+      return fail(
+        `"${argStr(args, 'view') ?? ''}" is not a screen. Pick one of: ${VIEW_IDS.join(', ')}.`,
+        'invalid_view',
+      );
+    }
+    const s = state();
+    if (s.view === view) return ok(`Already on **${VIEW_LABEL[view]}**.`, { view, changed: false });
+    s.setView(view);
+    return ok(`Opened **${VIEW_LABEL[view]}**.`, { view, from: s.view, changed: true });
+  },
+
+  filter_library: (args = {}) => {
+    const rawKind = argStr(args, 'kind');
+    const kind = argEnum(args, 'kind', KINDS);
+    if (rawKind && !kind && rawKind.toLowerCase() !== 'all') {
+      return fail(`"${rawKind}" is not a practice kind. Pick one of: ${KINDS.join(', ')}.`, 'invalid_kind');
+    }
+    const maxRaw = argNum(args, 'maxMinutes');
+
+    const s = state();
+    // Wholesale, not a patch: the contract says an omitted field CLEARS that
+    // filter, so "show me breathwork" cannot silently keep yesterday's length cap.
+    const applied = s.setLibraryFilter({
+      kind: kind ?? 'all',
+      ...(typeof maxRaw === 'number' ? { maxMinutes: maxRaw } : {}),
+    });
+
+    const matching = s.practices.filter(
+      (p) =>
+        (applied.kind === 'all' || p.kind === applied.kind) &&
+        (applied.maxMinutes === null || p.minutes <= applied.maxMinutes),
+    );
+
+    const parts: string[] = [];
+    if (applied.kind !== 'all') parts.push(applied.kind);
+    if (applied.maxMinutes !== null) parts.push(`${applied.maxMinutes} min or under`);
+    const scope = parts.length ? parts.join(', ') : 'everything';
+
+    // The filters only exist on the Practices screen, so say so rather than
+    // letting the agent claim a change the user cannot see.
+    const hint =
+      s.view === 'practice'
+        ? ''
+        : ' They are on the Practices screen — call navigate with view "practice" to show them.';
+    const empty = matching.length === 0 ? ' Nothing matches that combination, so the grid is empty.' : '';
+
+    return ok(
+      `Library filtered to **${scope}** — ${matching.length} of ${s.practices.length} practice${
+        s.practices.length === 1 ? '' : 's'
+      }.${empty}${hint}`,
+      { filter: applied, matching: matching.map(brief), matchCount: matching.length },
+    );
+  },
+
+  extend_session: (args = {}) => {
+    const s = state();
+    if (!s.active) return fail('Nothing is running, so there is no session to extend.', 'no_active_session');
+
+    const raw = argNum(args, 'minutes');
+    const minutes = typeof raw === 'number' && raw > 0 ? Math.min(raw, 30) : 1;
+    // Floor at 5s: the "hold this pose longer" control passes a fraction of a
+    // minute, and rounding that to zero would make the button do nothing.
+    const seconds = Math.max(5, Math.round(minutes * 60));
+
+    const added = s.extendSession(seconds);
+    if (!added) return fail('Nothing is running, so there is no session to extend.', 'no_active_session');
+
+    const practice = s.practices.find((p) => p.id === s.active!.practiceId);
+    const held = added.pose ? ` Holding **${added.pose}** for that much longer too.` : '';
+    return ok(
+      `Added ${humanMinutes(added.seconds / 60)} to **${practice?.title ?? 'your practice'}**.${held} No rush.`,
+      { secondsAdded: added.seconds, pose: added.pose ?? null },
+    );
+  },
+
+  abandon_session: (args = {}) => {
+    const reason = argStr(args, 'reason');
+    const s = state();
+    if (!s.active) return fail('Nothing is running, so there is nothing to stop.', 'no_active_session');
+
+    const practice = s.practices.find((p) => p.id === s.active!.practiceId);
+    const seconds = Math.max(0, Math.round(s.active.elapsed));
+    s.abandonSession(reason);
+
+    const spent = seconds < 60 ? 'under a minute' : `${Math.round(seconds / 60)} min`;
+    // Deliberately no streak talk and no "try again tomorrow". Stopping is a
+    // legitimate outcome, and this is an app people open when they feel bad.
+    return ok(
+      `Stopped **${practice?.title ?? 'your practice'}** after ${spent}. It is not logged as finished and it does not cost you anything — knowing when to stop is part of the practice.`,
+      { practiceId: practice?.id ?? null, seconds, reason: reason ?? null },
+    );
+  },
+
+  skip_pose: () => {
+    const s = state();
+    if (!s.active) return fail('Nothing is running, so there is no pose to skip.', 'no_active_session');
+
+    const practice = s.practices.find((p) => p.id === s.active!.practiceId);
+    if (!practice?.poses?.length) {
+      return fail(
+        `**${practice?.title ?? 'This practice'}** is not a pose sequence, so there is nothing to skip. You can pause, extend or finish it instead.`,
+        'not_a_pose_sequence',
+      );
+    }
+
+    const skipped = s.skipPose();
+    if (!skipped) {
+      return ok('You are already at the end of the sequence — there is no next pose to move to.', {
+        skipped: false,
+      });
+    }
+    const next = skipped.to
+      ? `Next: **${skipped.to.name}** — ${skipped.to.cue}`
+      : 'That was the last pose, so the sequence is done; finish whenever you are ready.';
+    return ok(`Moved on from **${skipped.from.name}**. ${next}`, {
+      skipped: true,
+      from: skipped.from.name,
+      to: skipped.to?.name ?? null,
+      secondsSkipped: skipped.secondsSkipped,
+    });
+  },
+
+  set_profile: (args = {}) => {
+    const raw = argRawStr(args, 'name');
+    if (raw === undefined) return fail('Tell me what you would like to be called.', 'missing_name');
+    const name = raw.trim().slice(0, 60);
+    state().setProfileName(name);
+    return name
+      ? ok(`I will call you **${name}** — it only appears in the greeting.`, { name })
+      : ok('Cleared your name. The greeting will just say hello.', { name: '' });
+  },
+
+  set_reminder: (args = {}) => {
+    const raw = argRawStr(args, 'time');
+    if (raw === undefined) {
+      return fail('Give me a time as HH:MM, or an empty string to turn the reminder off.', 'missing_time');
+    }
+    if (!raw.trim()) {
+      state().setReminder('');
+      return ok('Daily reminder off. Nothing will nudge you.', { time: '' });
+    }
+    const time = asClockTime(raw);
+    if (!time) {
+      return fail(`"${raw.trim()}" is not a time I can read. Use 24-hour HH:MM, e.g. 07:30 or 20:00.`, 'invalid_time');
+    }
+    state().setReminder(time);
+    return ok(`Daily reminder set for **${time}**. One gentle prompt — never a guilt trip about a missed streak.`, {
+      time,
+    });
+  },
+
+  set_accessibility: (args = {}) => {
+    const reduceMotion = argBool(args, 'reduceMotion');
+    const muted = argBool(args, 'muted');
+    if (reduceMotion === undefined && muted === undefined) {
+      return fail(
+        'Tell me which to change: reduceMotion (calm the animation) or muted (silence the ambience).',
+        'no_change_requested',
+      );
+    }
+
+    state().setAccessibility({
+      ...(reduceMotion === undefined ? {} : { reduceMotion }),
+      ...(muted === undefined ? {} : { muted }),
+    });
+
+    const said: string[] = [];
+    if (reduceMotion !== undefined) {
+      said.push(
+        reduceMotion
+          ? 'Motion reduced — the drifting background and the entrance animations are off'
+          : 'Motion restored',
+      );
+    }
+    if (muted !== undefined) {
+      said.push(muted ? 'ambience muted' : 'ambience unmuted');
+    }
+    const after = state().settings;
+    return ok(`${said.join(', ')}.`, {
+      reduceMotion: after.reduceMotion,
+      muted: state().muted,
+      soundscape: after.soundscape,
+    });
+  },
+
+  export_data: () => {
+    const s = state();
+    const json = s.exportJSON();
+    const kb = Math.max(1, Math.round(json.length / 1024));
+    return ok(
+      `Here is everything the app holds about you — ${s.sessions.length} session${
+        s.sessions.length === 1 ? '' : 's'
+      }, ${s.moods.length} mood check-in${s.moods.length === 1 ? '' : 's'}, ${kb} KB of plain JSON. It has never left this device, and it is yours to keep or move.`,
+      {
+        json,
+        bytes: json.length,
+        sessions: s.sessions.length,
+        moods: s.moods.length,
+        filename: `yoganext-${new Date().toISOString().slice(0, 10)}.json`,
+      },
+    );
+  },
+
+  reset_data: (args = {}) => {
+    if (argBool(args, 'confirm') !== true) {
+      // The refusal carries the script, so an agent asking for confirmation says
+      // what is actually lost rather than a vague "are you sure?".
+      return fail(
+        'I will not erase anything without an explicit confirmation. Tell the user plainly that this deletes every session, mood check-in, streak and milestone on this device and cannot be undone, offer export_data first, and call reset_data again with confirm: true only if they say yes.',
+        'confirmation_required',
+      );
+    }
+    const s = state();
+    const lost = {
+      sessions: s.sessions.length,
+      moods: s.moods.length,
+      streak: s.habit.streak,
+      totalMinutes: Math.round(s.habit.totalMinutes),
+    };
+    s.dangerouslyResetAll();
+    return ok(
+      `Erased. ${lost.sessions} session${lost.sessions === 1 ? '' : 's'} and ${lost.moods} mood check-in${
+        lost.moods === 1 ? '' : 's'
+      } are gone and the streak is back to zero. Nothing was sent anywhere — it was only ever on this device.`,
+      lost,
+    );
   },
 };
 

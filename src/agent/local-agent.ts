@@ -140,6 +140,26 @@ const THEME_WORDS = ['aurora', 'dusk', 'forest', 'sand'] as const;
 const SOUND_WORDS = ['none', 'rain', 'ocean', 'forest', 'singing-bowl'] as const;
 const KIND_WORDS = ['meditation', 'breathwork', 'yoga', 'sleep', 'journal'] as const;
 
+/** What the user might call each screen. First match wins. */
+const VIEW_ALIASES: Array<[RegExp, string]> = [
+  [/\b(today|home|main screen|dashboard)\b/, 'today'],
+  [/\b(practices?|library|catalogue|catalog)\b/, 'practice'],
+  [/\b(progress|stats|statistics|history)\b/, 'progress'],
+  [/\b(settings|profile|preferences|account|options)\b/, 'you'],
+];
+
+/** Navigation needs an explicit verb, so "my progress" still ANSWERS the question. */
+const NAV_VERB = /\b(show me|open|go to|take me to|switch to|navigate to|jump to|bring up)\b/;
+
+/**
+ * Wiping the user's history is the one irreversible action on the surface, so it
+ * takes two turns and an unambiguous phrase. A bare "yes" must never reach it —
+ * the affirmative rule that resolves "yes, start it" would otherwise be one
+ * ambiguous turn away from deleting everything.
+ */
+const ERASE = /\b(erase|delete|wipe|reset|clear)\b.*\b(everything|all|my data|data|history|progress|streak)\b|\bstart over\b|\bfactory reset\b/;
+const ERASE_CONFIRMED = /\b(yes|confirm|confirmed|i'm sure|im sure|i am sure|go ahead|do it)\b/;
+
 // ─────────────────────────────────────────────────── practice name lookup ──
 
 /**
@@ -243,6 +263,92 @@ export function respond(utterance: string, ctxIn: CoachContext = {}): AgentReply
     );
   }
 
+  // ── comfort / accessibility ────────────────────────────────────────────
+  // First, and deliberately so. Someone reporting nausea or a vestibular
+  // problem must not have "motion" swallowed by a softer rule further down.
+  if (/\b(motion sick|motion-sick|nausea|nauseous|queasy|dizzy|dizziness|vertigo|migraine|vestibular|makes me sick|animation|animations|reduce motion|less motion|too much movement|still(er)? background)\b/.test(t)) {
+    const off = /\b(no|off|stop|less|reduce|calm|disable|too much|makes me|sick|queasy|dizzy|nausea|migraine|vestibular)\b/.test(t);
+    const call = run('set_accessibility', { reduceMotion: off });
+    return reply(
+      'accessibility',
+      off ? 'reported motion discomfort — reducing motion immediately' : 'asked to restore animation',
+      call.result.message,
+      call,
+      ctx,
+      ['Mute the sound too', 'What should I do?'],
+    );
+  }
+
+  if (/\b(mute|unmute|silence it|quiet it)\b/.test(t)) {
+    const muted = !/\bunmute|turn (the )?sound back|un-mute\b/.test(t);
+    const call = run('set_accessibility', { muted });
+    return reply('accessibility', `matched ${muted ? 'mute' : 'unmute'}`, call.result.message, call, ctx);
+  }
+
+  // ── data ownership ─────────────────────────────────────────────────────
+  if (/\b(export|download|back ?up|copy of my data|take my data|my data out)\b/.test(t)) {
+    const call = run('export_data', {});
+    return reply('export', 'asked for their data', call.result.message, call, ctx);
+  }
+
+  // Destructive, so it takes two turns and an explicit phrase. A bare "yes"
+  // must never reach this — the affirmative rule that resolves "yes, start it"
+  // is otherwise one ambiguous turn away from deleting everything.
+  if (ERASE.test(t)) {
+    if (ERASE_CONFIRMED.test(t)) {
+      const call = run('reset_data', { confirm: true });
+      return reply('reset_confirmed', 'erase requested WITH an explicit confirmation in the same message', call.result.message, call, ctx);
+    }
+    return reply(
+      'reset_unconfirmed',
+      'erase requested without confirmation — refusing to act on one ambiguous turn',
+      'That erases every session, mood check-in, streak and milestone on this device, and it cannot be undone. I would rather you had a copy first — say "export my data" and I will hand it to you. If you are certain, say "yes, erase everything" and I will do it.',
+      null,
+      ctx,
+      ['Export my data', 'Yes, erase everything', 'Never mind'],
+    );
+  }
+
+  // ── profile / reminder ─────────────────────────────────────────────────
+  const nameMatch = raw.match(/\b(?:call me|my name is|i'?m called|name'?s)\s+([A-Za-z][A-Za-z'\- ]{0,40})/i);
+  if (nameMatch) {
+    const name = nameMatch[1].trim().replace(/\s+(please|thanks|thank you)$/i, '');
+    const call = run('set_profile', { name });
+    return reply('profile', `read the name "${name}"`, call.result.message, call, ctx);
+  }
+
+  if (/\bremind|reminder\b/.test(t)) {
+    const off = /\b(no|off|stop|cancel|disable|don't|dont|turn off)\b/.test(t);
+    const timeMatch = t.match(/\b(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/);
+    if (off && !timeMatch) {
+      const call = run('set_reminder', { time: '' });
+      return reply('reminder', 'asked to turn the reminder off', call.result.message, call, ctx);
+    }
+    if (timeMatch) {
+      const call = run('set_reminder', { time: timeMatch[1] });
+      return reply('reminder', `read the time "${timeMatch[1]}"`, call.result.message, call, ctx);
+    }
+    return reply(
+      'reminder_unresolved',
+      'asked about reminders without a time',
+      'What time would you like the daily nudge? Tell me something like "remind me at 07:30", or say "turn reminders off".',
+      null,
+      ctx,
+      ['Remind me at 07:30', 'Turn reminders off'],
+    );
+  }
+
+  // ── navigation ─────────────────────────────────────────────────────────
+  // Needs an explicit navigation verb, so "my progress" still ANSWERS the
+  // question rather than silently switching a tab behind the console.
+  if (NAV_VERB.test(t)) {
+    const dest = VIEW_ALIASES.find(([re]) => re.test(t));
+    if (dest) {
+      const call = run('navigate', { view: dest[1] });
+      return reply('navigate', `matched a navigation verb and the "${dest[1]}" screen`, call.result.message, call, ctx);
+    }
+  }
+
   // ── progress / insight (read-only, so safe to run unprompted) ──────────
   if (/\b(how am i doing|my progress|my streak|streak|how many (days|minutes|sessions)|stats|total minutes)\b/.test(t)) {
     const call = run('get_progress', {});
@@ -256,6 +362,37 @@ export function respond(utterance: string, ctxIn: CoachContext = {}): AgentReply
     return reply('insights', 'asked what the data shows', call.result.message, call, ctx);
   }
 
+  // ── library filtering (changes what the user SEES, unlike list_practices) ──
+  const kindWord = KIND_WORDS.find((k) => new RegExp(`\\b${k}s?\\b`).test(t));
+  if (/\b(clear|reset|remove|drop)\b.*\bfilters?\b/.test(t)) {
+    const call = run('filter_library', {});
+    return reply('filter_clear', 'asked to clear the library filters', call.result.message, call, ctx);
+  }
+  if (/\b(filter|only|just|narrow|restrict)\b/.test(t) && (kindWord || typeof minutes === 'number')) {
+    const args: ToolArgs = {};
+    if (kindWord) args.kind = kindWord;
+    if (typeof minutes === 'number') args.maxMinutes = minutes;
+    const call = run('filter_library', args);
+    return reply('filter', `filtering the library by ${JSON.stringify(args)}`, call.result.message, call, ctx, [
+      'Show me the library',
+      'Clear the filters',
+    ]);
+  }
+
+  // ── in-session adjustments ─────────────────────────────────────────────
+  if (/\b(more|longer|extend|another|extra|bit more|keep going a)\b/.test(t) && /\b(minute|minutes|min|time|while|bit)\b/.test(t)) {
+    const call = run('extend_session', typeof minutes === 'number' ? { minutes } : {});
+    return reply('extend', minutes ? `asked for ${minutes} more minutes` : 'asked for more time', call.result.message, call, ctx, [
+      "I'm done",
+      'Pause',
+    ]);
+  }
+
+  if (/\b(skip|next pose|move on|this pose|hurts|painful|can't hold|cannot hold)\b/.test(t)) {
+    const call = run('skip_pose', {});
+    return reply('skip_pose', 'asked to move past the current pose', call.result.message, call, ctx);
+  }
+
   // ── transport controls ─────────────────────────────────────────────────
   if (/\b(pause|hold on|wait a (sec|minute)|stop for a moment|freeze)\b/.test(t)) {
     const call = run('pause_session', {});
@@ -267,7 +404,24 @@ export function respond(utterance: string, ctxIn: CoachContext = {}): AgentReply
     return reply('resume', 'asked to resume', call.result.message, call, ctx);
   }
 
-  if (/\b(done|finished|finish|complete|that's it|thats it|end (the )?session|i'm out|stop now)\b/.test(t)) {
+  // Abandon sits ABOVE complete, and the two are kept strictly apart: completing
+  // credits the streak, abandoning does not. Logging a walked-away session as
+  // finished fakes the number the whole habit engine rests on; refusing to log a
+  // finished one denies credit that was earned. "I need to stop" is not "done".
+  if (/\b(i need to stop|need to stop|have to stop|stop now|give up|giving up|quit|i can'?t do this|can'?t do this|cut it short|not feeling it|abandon|had enough|i'?m out)\b/.test(t)) {
+    const reasonMatch = raw.match(/\b(?:because|reason)\b[:,]?\s*(.{3,})$/i);
+    const call = run('abandon_session', reasonMatch ? { reason: reasonMatch[1].trim() } : {});
+    return reply(
+      'abandon',
+      'asked to stop early — recorded as NOT completed, so no streak credit is faked',
+      call.result.message,
+      call,
+      ctx,
+      ['How am I doing?', 'Something shorter'],
+    );
+  }
+
+  if (/\b(done|finished|finish|complete|that's it|thats it|end (the )?session)\b/.test(t)) {
     const args: ToolArgs = {};
     const after = explicitMood ?? impliedMood;
     if (after) args.moodAfter = after;
@@ -359,7 +513,21 @@ export function respond(utterance: string, ctxIn: CoachContext = {}): AgentReply
     }
     if (args) {
       const call = run('create_breath_pattern', args);
-      return reply('breath_pattern', box ? 'recognised box breathing' : 'parsed the phase lengths from the message', call.result.message, call, ctx);
+      // The store wraps a new pattern into a startable practice; carry its id so
+      // "start it" works on the thing they just made, not the last suggestion.
+      const made = (call.result.data as { practice?: { id: string; title: string } } | undefined)?.practice;
+      if (made) {
+        ctx.lastRecommendedPracticeId = made.id;
+        ctx.lastRecommendedTitle = made.title;
+      }
+      return reply(
+        'breath_pattern',
+        box ? 'recognised box breathing' : 'parsed the phase lengths from the message',
+        call.result.message,
+        call,
+        ctx,
+        ['Start it', 'How am I doing?'],
+      );
     }
     return reply(
       'breath_unresolved',

@@ -5,8 +5,14 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
 
+    // This project is REFERENCED by tsconfig.json, and a referenced project may
+    // not disable emit (TS6310) — `noEmit: true` here makes `tsc --noEmit` fail
+    // at the root before it type-checks a single source file. Declarations only,
+    // parked in node_modules so nothing lands next to vite.config.ts.
+    // `allowImportingTsExtensions` accepts emitDeclarationOnly as well as noEmit.
     "composite": true,
-    "noEmit": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./node_modules/.tmp/node-types",
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
 
     "allowImportingTsExtensions": true,

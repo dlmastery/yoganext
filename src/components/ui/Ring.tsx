@@ -32,10 +32,12 @@ export function Ring({
   value,
   size = 132,
   stroke = 10,
-  // Fall back through the token chain so the ring still renders if a palette
-  // omits the secondary accent.
-  from = 'var(--accent, #8b5cf6)',
-  to = 'var(--accent-2, var(--accent, #22d3ee))',
+  // The palette tokens are space-separated RGB TRIPLES (`--accent: 139 124 255`),
+  // so they must be wrapped in rgb() — `stroke="var(--accent)"` would resolve to
+  // the bare string "139 124 255" and paint nothing. The literal inside each
+  // var() is the fallback triple, not a hex colour, for the same reason.
+  from = 'rgb(var(--accent, 139 124 255))',
+  to = 'rgb(var(--accent-2, 232 121 199))',
   label,
   children,
   className,
@@ -72,7 +74,7 @@ export function Ring({
           fill="none"
           stroke="currentColor"
           strokeWidth={stroke}
-          className={muted ? 'text-white/[0.04]' : 'text-white/[0.08]'}
+          className={muted ? 'text-fg/[0.06]' : 'text-fg/[0.10]'}
         />
         <motion.circle
           cx={size / 2}

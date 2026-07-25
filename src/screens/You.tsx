@@ -13,6 +13,7 @@ import {
   Check,
   CloudRain,
   Download,
+  LifeBuoy,
   Minus,
   Moon,
   Plus,
@@ -22,7 +23,9 @@ import {
   VolumeX,
   Waves,
 } from 'lucide-react';
+import { callTool } from '../agent/tools';
 import { useStore } from '../lib/store';
+import { THEME_LIST } from '../lib/theme';
 import type { Settings } from '../lib/types';
 import { Card, SectionLabel } from '../components/ui/Card';
 import { Chip, ChipRow } from '../components/ui/Chip';
@@ -32,16 +35,12 @@ import { useAppState } from '../components/ui/useAppData';
 // ─────────────────────────────────────────────────────────────────── palettes ──
 
 /**
- * Preview swatches only. The real palettes live in the design system as CSS
- * variables; these three stops are a faithful thumbnail so the choice can be
- * made by eye rather than by name.
+ * The swatches are read from `lib/theme`, not hand-copied here. A picker whose
+ * previews can drift from the palettes they preview is worse than no preview:
+ * `THEME_LIST` carries the real stops, label and one-line mood, so the thumbnail
+ * is the palette by construction.
  */
-const THEMES: Array<{ id: Settings['theme']; label: string; note: string; stops: [string, string, string] }> = [
-  { id: 'aurora', label: 'Aurora', note: 'Deep indigo, violet light', stops: ['#0b1020', '#6d5efc', '#22d3ee'] },
-  { id: 'dusk', label: 'Dusk', note: 'Warm dark, ember accents', stops: ['#150f14', '#e0724f', '#f2b28c'] },
-  { id: 'forest', label: 'Forest', note: 'Cool green, moss and mist', stops: ['#0a1512', '#2f9e73', '#a7e8c8'] },
-  { id: 'sand', label: 'Sand', note: 'Light, paper and clay', stops: ['#f4efe7', '#c08457', '#7a6a55'] },
-];
+const THEME_OPTIONS = THEME_LIST;
 
 const SOUNDSCAPES: Array<{ id: Settings['soundscape']; label: string; icon: typeof Waves }> = [
   { id: 'none', label: 'Silence', icon: VolumeX },
@@ -83,14 +82,14 @@ function Switch({
         className={[
           'relative mt-0.5 h-7 w-12 shrink-0 rounded-full transition-colors duration-300',
           'outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
-          checked ? 'bg-accent/80' : 'bg-white/10',
+          checked ? 'bg-accent' : 'bg-fg/20',
         ].join(' ')}
       >
         <motion.span
           aria-hidden="true"
           layout
           transition={{ type: 'spring', stiffness: 560, damping: 34 }}
-          className="absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm"
+          className="absolute top-1 h-5 w-5 rounded-full bg-fg shadow-sm"
           style={{ left: checked ? 26 : 4 }}
         />
       </button>
@@ -100,15 +99,25 @@ function Switch({
 
 // ─────────────────────────────────────────────────────────────────── screen ──
 
+/**
+ * Every control on this screen is a tool call. Nothing here reaches into the
+ * store directly, which is what makes "call me Sam", "remind me at seven",
+ * "I get motion sick" and "export my data" work identically whether they are
+ * typed to the coach or tapped here.
+ */
 export default function You() {
   const state = useAppState();
-  const setTheme = useStore((s) => s.setTheme);
-  const setSoundscape = useStore((s) => s.setSoundscape);
-  const setIntention = useStore((s) => s.setIntention);
-  const setReduceMotion = useStore((s) => s.setReduceMotion);
-  const setName = useStore((s) => s.setName);
-  const setReminder = useStore((s) => s.setReminder);
-  const reset = useStore((s) => s.reset);
+
+  /**
+   * The two exceptions to the tools-only rule above, and deliberately so:
+   * `_recovered` is not a user capability, it is a report that a saved blob on
+   * THIS device was unreadable and had to be discarded. Someone whose streak
+   * silently went to zero deserves to be told that it was a storage fault and
+   * not something they imagined — staying quiet about it is the one thing this
+   * screen must not do. `acknowledgeRecovery` just dismisses that notice.
+   */
+  const recovered = useStore((s) => s._recovered);
+  const acknowledgeRecovery = useStore((s) => s.acknowledgeRecovery);
 
   const [confirmReset, setConfirmReset] = useState(false);
   const [exported, setExported] = useState(false);
@@ -116,30 +125,22 @@ export default function You() {
   const goal = Math.min(GOAL_MAX, Math.max(GOAL_MIN, state.habit.dailyGoalMinutes || 10));
   const reminderOn = Boolean(state.settings.reminderAt);
 
-  const exportPayload = useMemo(
-    () =>
-      JSON.stringify(
-        {
-          exportedAt: new Date().toISOString(),
-          app: 'yoganext',
-          sessions: state.sessions,
-          moods: state.moods,
-          habit: state.habit,
-          achievements: state.achievements,
-          settings: state.settings,
-        },
-        null,
-        2,
-      ),
-    [state],
-  );
-
+  /**
+   * The tool owns the payload; this function owns the browser. `export_data`
+   * returns the JSON string (the same projection that gets persisted), and the
+   * only thing left for the GUI to do is the part an agent cannot do — put a
+   * file in the user's downloads folder.
+   */
   function download() {
-    const blob = new Blob([exportPayload], { type: 'application/json' });
+    const res = callTool('export_data');
+    const data = res.data as { json?: string; filename?: string } | undefined;
+    if (!res.ok || !data?.json) return;
+
+    const blob = new Blob([data.json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `yoganext-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = data.filename ?? `yoganext-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
     setExported(true);
@@ -158,17 +159,54 @@ export default function You() {
         <p className="text-base text-fg-muted">Make it yours. Everything here is local to you.</p>
       </header>
 
+      {/* Storage-fault notice. Calm, not alarming, and never silent. */}
+      {recovered && (
+        <motion.div
+          role="status"
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+        >
+          <Card className="flex flex-col gap-3 border border-amber-700/30 dark:border-amber-400/25">
+            <div className="flex items-start gap-2.5">
+              <LifeBuoy
+                size={17}
+                aria-hidden="true"
+                className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-300"
+              />
+              <div className="flex flex-col gap-1.5">
+                <p className="text-[15px] font-medium leading-snug text-fg">
+                  Some of your saved history could not be read.
+                </p>
+                <p className="text-sm leading-relaxed text-fg-muted">
+                  The data stored on this device was damaged, so it was discarded and the app
+                  started fresh. If your streak or sessions look wrong, that is why — it was a
+                  storage fault, not something you did or imagined.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={acknowledgeRecovery}
+              className="self-start rounded-full border border-line px-4 py-2 text-sm font-medium text-fg transition-colors hover:bg-fg/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Understood
+            </button>
+          </Card>
+        </motion.div>
+      )}
+
       {/* Name */}
       <Card className="flex flex-col gap-3">
         <SectionLabel>What should we call you?</SectionLabel>
         <input
           type="text"
           value={state.settings.name ?? ''}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => callTool('set_profile', { name: e.target.value })}
           placeholder="Your name"
           aria-label="Your name"
           maxLength={40}
-          className="w-full rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-[15px] text-fg placeholder:text-fg-muted/60 outline-none transition-colors focus-visible:border-white/20 focus-visible:ring-2 focus-visible:ring-ring"
+          className="w-full rounded-2xl border border-line bg-fg/[0.04] px-4 py-3 text-[15px] text-fg placeholder:text-fg-muted/60 outline-none transition-colors focus-visible:border-fg/25 focus-visible:ring-2 focus-visible:ring-ring"
         />
         <p className="text-xs text-fg-muted">Used only in the greeting. Leave it blank if you'd rather not.</p>
       </Card>
@@ -177,36 +215,38 @@ export default function You() {
       <Card className="flex flex-col gap-4">
         <SectionLabel>Atmosphere</SectionLabel>
         <div role="radiogroup" aria-label="Colour theme" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {THEMES.map((t) => {
-            const active = state.settings.theme === t.id;
+          {THEME_OPTIONS.map((t) => {
+            const active = state.settings.theme === t.name;
             return (
               <motion.button
-                key={t.id}
+                key={t.name}
                 type="button"
                 role="radio"
                 aria-checked={active}
-                onClick={() => setTheme(t.id)}
+                onClick={() => callTool('set_theme', { theme: t.name })}
                 whileHover={{ y: -3 }}
                 whileTap={{ scale: 0.97 }}
                 transition={{ type: 'spring', stiffness: 440, damping: 28 }}
                 className={[
                   'relative flex flex-col gap-2 rounded-2xl p-2 text-left',
                   'outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
-                  active ? 'ring-2 ring-accent' : 'ring-1 ring-white/10 hover:ring-white/20',
+                  active ? 'ring-2 ring-accent' : 'ring-1 ring-line hover:ring-fg/25',
                 ].join(' ')}
               >
                 <span
                   aria-hidden="true"
                   className="h-14 w-full rounded-xl"
                   style={{
-                    background: `linear-gradient(135deg, ${t.stops[0]} 0%, ${t.stops[1]} 62%, ${t.stops[2]} 100%)`,
+                    // Ground first, then both accents: this is what makes the
+                    // light `sand` swatch read as light rather than as purple.
+                    background: `linear-gradient(135deg, ${t.tokens.bg} 0%, ${t.tokens.accent} 58%, ${t.tokens.accent2} 100%)`,
                   }}
                 />
                 <span className="flex items-center gap-1.5 px-0.5">
                   <span className="text-sm font-semibold text-fg">{t.label}</span>
                   {active && <Check size={13} aria-hidden="true" className="text-accent" />}
                 </span>
-                <span className="px-0.5 pb-1 text-[11px] leading-snug text-fg-muted">{t.note}</span>
+                <span className="px-0.5 pb-1 text-[11px] leading-snug text-fg-muted">{t.mood}</span>
               </motion.button>
             );
           })}
@@ -224,7 +264,7 @@ export default function You() {
                 key={s.id}
                 groupId="sound"
                 selected={state.settings.soundscape === s.id}
-                onClick={() => setSoundscape(s.id)}
+                onClick={() => callTool('set_soundscape', { soundscape: s.id })}
               >
                 <SIcon size={14} aria-hidden="true" />
                 {s.label}
@@ -253,19 +293,19 @@ export default function You() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setIntention(Math.max(GOAL_MIN, goal - 1))}
+              onClick={() => callTool('set_intention', { minutes: goal - 1 })}
               disabled={goal <= GOAL_MIN}
               aria-label="Decrease daily goal by one minute"
-              className="grid h-10 w-10 place-items-center rounded-full border border-white/10 text-fg transition-colors hover:bg-white/5 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="grid h-10 w-10 place-items-center rounded-full border border-line text-fg transition-colors hover:bg-fg/5 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Minus size={16} aria-hidden="true" />
             </button>
             <button
               type="button"
-              onClick={() => setIntention(Math.min(GOAL_MAX, goal + 1))}
+              onClick={() => callTool('set_intention', { minutes: goal + 1 })}
               disabled={goal >= GOAL_MAX}
               aria-label="Increase daily goal by one minute"
-              className="grid h-10 w-10 place-items-center rounded-full border border-white/10 text-fg transition-colors hover:bg-white/5 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="grid h-10 w-10 place-items-center rounded-full border border-line text-fg transition-colors hover:bg-fg/5 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Plus size={16} aria-hidden="true" />
             </button>
@@ -273,7 +313,7 @@ export default function You() {
         </div>
         <ChipRow label="Common daily goals">
           {GOAL_PRESETS.map((m) => (
-            <Chip key={m} groupId="goal" selected={goal === m} onClick={() => setIntention(m)}>
+            <Chip key={m} groupId="goal" selected={goal === m} onClick={() => callTool('set_intention', { minutes: m })}>
               {m} min
             </Chip>
           ))}
@@ -287,7 +327,7 @@ export default function You() {
           label="Nudge me once a day"
           description="A single gentle prompt. Never a guilt trip about a missed streak."
           checked={reminderOn}
-          onChange={(v) => setReminder(v ? '20:00' : '')}
+          onChange={(v) => callTool('set_reminder', { time: v ? '20:00' : '' })}
         />
         {reminderOn && (
           <motion.label
@@ -302,9 +342,9 @@ export default function You() {
             <input
               type="time"
               value={state.settings.reminderAt || '20:00'}
-              onChange={(e) => setReminder(e.target.value)}
+              onChange={(e) => callTool('set_reminder', { time: e.target.value })}
               aria-label="Reminder time"
-              className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[15px] tabular-nums text-fg outline-none focus-visible:border-white/20 focus-visible:ring-2 focus-visible:ring-ring"
+              className="rounded-xl border border-line bg-fg/[0.04] px-3 py-2 text-[15px] tabular-nums text-fg outline-none focus-visible:border-fg/25 focus-visible:ring-2 focus-visible:ring-ring"
             />
           </motion.label>
         )}
@@ -316,7 +356,7 @@ export default function You() {
           label="Reduce motion"
           description="Turns off the drifting background and entrance animations. Also respected automatically if your system asks for it."
           checked={Boolean(state.settings.reduceMotion)}
-          onChange={setReduceMotion}
+          onChange={(v) => callTool('set_accessibility', { reduceMotion: v })}
         />
       </Card>
 
@@ -332,7 +372,7 @@ export default function You() {
           <button
             type="button"
             onClick={download}
-            className="inline-flex items-center gap-2 rounded-full border border-white/10 px-4 py-2.5 text-sm font-medium text-fg transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex items-center gap-2 rounded-full border border-line px-4 py-2.5 text-sm font-medium text-fg transition-colors hover:bg-fg/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {exported ? <Check size={15} aria-hidden="true" /> : <Download size={15} aria-hidden="true" />}
             {exported ? 'Downloaded' : 'Export JSON'}
@@ -340,7 +380,9 @@ export default function You() {
           <button
             type="button"
             onClick={() => setConfirmReset(true)}
-            className="inline-flex items-center gap-2 rounded-full border border-red-400/25 px-4 py-2.5 text-sm font-medium text-red-300 transition-colors hover:bg-red-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            /* `dark:` here means "any palette except sand" (see tailwind.config
+               darkMode). Base styles are the light-theme ones. */
+            className="inline-flex items-center gap-2 rounded-full border border-red-600/35 px-4 py-2.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-600/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-red-400/25 dark:text-red-300 dark:hover:bg-red-400/10"
           >
             <Trash2 size={15} aria-hidden="true" />
             Reset everything
@@ -368,7 +410,7 @@ export default function You() {
             <button
               type="button"
               onClick={() => {
-                reset();
+                callTool('reset_data', { confirm: true });
                 setConfirmReset(false);
               }}
               className="inline-flex flex-1 items-center justify-center gap-2 rounded-full bg-red-500/90 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -379,7 +421,7 @@ export default function You() {
             <button
               type="button"
               onClick={() => setConfirmReset(false)}
-              className="flex-1 rounded-full border border-white/10 px-4 py-3 text-sm font-medium text-fg transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="flex-1 rounded-full border border-line px-4 py-3 text-sm font-medium text-fg transition-colors hover:bg-fg/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               Keep my history
             </button>

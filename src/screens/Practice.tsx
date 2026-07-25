@@ -5,10 +5,11 @@
  * *configure* is a library you stop opening. Cards carry their own gradient so
  * the grid reads as a set of moods rather than a spreadsheet of durations.
  */
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Clock3, Search } from 'lucide-react';
 import { useStore } from '../lib/store';
+import { callTool } from '../agent/tools';
 import type { Practice as PracticeT, PracticeKind } from '../lib/types';
 import { CardButton, SectionLabel } from '../components/ui/Card';
 import { Chip, ChipRow } from '../components/ui/Chip';
@@ -16,14 +17,22 @@ import { INTENSITY_LABEL, KIND_LABEL } from '../components/ui/useAppData';
 
 const KINDS: PracticeKind[] = ['meditation', 'breathwork', 'yoga', 'sleep', 'journal'];
 
-const LENGTHS = [
-  { id: 'any', label: 'Any length', test: () => true },
-  { id: 'short', label: 'Under 5 min', test: (p: PracticeT) => p.minutes < 5 },
-  { id: 'mid', label: '5–15 min', test: (p: PracticeT) => p.minutes >= 5 && p.minutes <= 15 },
-  { id: 'long', label: 'Over 15 min', test: (p: PracticeT) => p.minutes > 15 },
-] as const;
-
-type LengthId = (typeof LENGTHS)[number]['id'];
+/**
+ * Length filters are CEILINGS, not bands.
+ *
+ * They used to be ranges ("5–15 min", "Over 15 min"), which read fine but was a
+ * filter the tool surface could not express: `filter_library` takes a
+ * `maxMinutes`, so an agent could never reproduce what the chips did. A control
+ * only the GUI can operate is the exact asymmetry this app is not allowed to
+ * have — so the buckets became ceilings, and each chip is now one tool call.
+ * "Up to 15 min" is also the question people actually ask.
+ */
+const LENGTHS: Array<{ id: string; label: string; maxMinutes: number | null }> = [
+  { id: 'any', label: 'Any length', maxMinutes: null },
+  { id: 'to5', label: 'Up to 5 min', maxMinutes: 5 },
+  { id: 'to15', label: 'Up to 15 min', maxMinutes: 15 },
+  { id: 'to30', label: 'Up to 30 min', maxMinutes: 30 },
+];
 
 const INTENSITY_BARS: Record<PracticeT['intensity'], number> = {
   restorative: 1,
@@ -106,18 +115,32 @@ function PracticeCard({ practice, onStart }: { practice: PracticeT; onStart: () 
 
 export default function Practice() {
   const practices = useStore((s) => s.practices);
-  const startSession = useStore((s) => s.startSession);
+  /**
+   * The filters live in the store and are set through `filter_library`, so
+   * "only short breathwork" said to the coach and two taps here are the same
+   * operation. `filter_library` replaces the whole filter rather than patching
+   * it (an omitted field clears that dimension, per the contract), so each
+   * handler passes the other dimension's current value along explicitly.
+   */
+  const { kind, maxMinutes } = useStore((s) => s.libraryFilter);
 
-  const [kind, setKind] = useState<PracticeKind | 'all'>('all');
-  const [length, setLength] = useState<LengthId>('any');
+  const setFilter = (next: { kind?: PracticeKind | 'all'; maxMinutes?: number | null }) => {
+    const k = next.kind === undefined ? kind : next.kind;
+    const m = next.maxMinutes === undefined ? maxMinutes : next.maxMinutes;
+    callTool('filter_library', {
+      ...(k === 'all' ? {} : { kind: k }),
+      ...(m === null ? {} : { maxMinutes: m }),
+    });
+  };
 
-  const visible = useMemo(() => {
-    const lengthTest = LENGTHS.find((l) => l.id === length)?.test ?? (() => true);
-    return practices
-      .filter((p) => (kind === 'all' ? true : p.kind === kind))
-      .filter((p) => lengthTest(p))
-      .sort((x, y) => x.minutes - y.minutes);
-  }, [practices, kind, length]);
+  const visible = useMemo(
+    () =>
+      practices
+        .filter((p) => (kind === 'all' ? true : p.kind === kind))
+        .filter((p) => (maxMinutes === null ? true : p.minutes <= maxMinutes))
+        .sort((x, y) => x.minutes - y.minutes),
+    [practices, kind, maxMinutes],
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-7 px-5 pb-8 pt-10 sm:px-8 sm:pt-16">
@@ -137,11 +160,11 @@ export default function Practice() {
       <div className="flex flex-col gap-3">
         <SectionLabel>Kind</SectionLabel>
         <ChipRow label="Filter by practice kind">
-          <Chip groupId="kind" selected={kind === 'all'} onClick={() => setKind('all')}>
+          <Chip groupId="kind" selected={kind === 'all'} onClick={() => setFilter({ kind: 'all' })}>
             Everything
           </Chip>
           {KINDS.map((k) => (
-            <Chip key={k} groupId="kind" selected={kind === k} onClick={() => setKind(k)}>
+            <Chip key={k} groupId="kind" selected={kind === k} onClick={() => setFilter({ kind: k })}>
               {KIND_LABEL[k]}
             </Chip>
           ))}
@@ -153,8 +176,8 @@ export default function Practice() {
             <Chip
               key={l.id}
               groupId="length"
-              selected={length === l.id}
-              onClick={() => setLength(l.id)}
+              selected={maxMinutes === l.maxMinutes}
+              onClick={() => setFilter({ maxMinutes: l.maxMinutes })}
             >
               {l.label}
             </Chip>
@@ -166,7 +189,11 @@ export default function Practice() {
         <motion.ul layout className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <AnimatePresence mode="popLayout">
             {visible.map((p) => (
-              <PracticeCard key={p.id} practice={p} onStart={() => startSession(p.id)} />
+              <PracticeCard
+                key={p.id}
+                practice={p}
+                onStart={() => callTool('start_session', { practiceId: p.id })}
+              />
             ))}
           </AnimatePresence>
         </motion.ul>
@@ -178,11 +205,10 @@ export default function Practice() {
           </p>
           <button
             type="button"
-            onClick={() => {
-              setKind('all');
-              setLength('any');
-            }}
-            className="rounded-full border border-white/10 px-4 py-2 text-sm font-medium text-fg transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            /* No arguments at all: `filter_library` reads an omitted field as
+               "clear this filter", so an empty call IS the clear button. */
+            onClick={() => callTool('filter_library', {})}
+            className="rounded-full border border-line px-4 py-2 text-sm font-medium text-fg transition-colors hover:bg-fg/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             Clear filters
           </button>
