@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+
+    // `tsc -b` (npm run build) requires composite; `tsc --noEmit` (npm run
+    // typecheck) requires noEmit. Both together is the Vite 6 / TS 5.7 template.
+    "composite": true,
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+
+    // Node 22's --experimental-strip-types (npm run agent:tools, and running
+    // src/lib/*.test.ts directly) resolves ONLY explicit `./foo.ts` specifiers —
+    // extensionless and `./foo.js` both throw ERR_MODULE_NOT_FOUND. TS accepts
+    // those specifiers only with this flag, which in turn requires noEmit above.
+    // Vite/esbuild resolve `.ts` specifiers natively, so the bundle is unaffected.
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "skipLibCheck": true,
+
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    // Deliberately off: several agents author these files in parallel and a
+    // stray unused import should not turn `npm run typecheck` red. Turn on once
+    // the app has settled.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+
+    // vite/client declares `*.css`, `*.svg`, import.meta.env and friends.
+    "types": ["vite/client"],
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

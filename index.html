@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" data-theme="aurora" data-reduce-motion="false">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+    <title>YogaNext — a sanctuary for your nervous system</title>
+    <meta
+      name="description"
+      content="Meditation, breathwork, yoga and mood — a quiet place to practise, and an app an agent can drive for you."
+    />
+
+    <!-- theme-color is swapped at runtime by the theme store; these are the two resting states -->
+    <meta name="theme-color" content="#090818" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5efe6" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="dark light" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <!--
+      Type: Fraunces (variable — optical size, SOFT and WONK axes) carries the display
+      voice; its soft, slightly wonky curves read as hand-drawn rather than editorial.
+      Inter carries every UI surface. Two families only — this app should feel light.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..700,0..100,0..1&family=Inter:wght@300..700&display=swap"
+    />
+
+    <script>
+      // Paint the persisted palette before first paint so the app never flashes the
+      // default theme. Reads the zustand-persist blob under `yoganext`; every branch
+      // is optional, so an empty or malformed store simply leaves the defaults alone.
+      (function () {
+        try {
+          var s = JSON.parse(localStorage.getItem('yoganext') || '{}');
+          var settings = (s.state && s.state.settings) || s.settings || {};
+          var el = document.documentElement;
+          if (['aurora', 'dusk', 'forest', 'sand'].indexOf(settings.theme) > -1) {
+            el.dataset.theme = settings.theme;
+          }
+          var system = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+          el.dataset.reduceMotion = String(settings.reduceMotion === true || system);
+        } catch (e) {
+          /* defaults in the markup stand */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      YogaNext needs JavaScript to run its timers and breath animations. Enable it, or use the
+      agent tool surface directly.
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
