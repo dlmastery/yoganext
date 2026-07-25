@@ -223,23 +223,11 @@ export default function App() {
     callTool('navigate', { view: v });
   }, []);
   const [coachOpen, setCoachOpen] = useState(false);
-  /**
-   * The store has no `cancelSession` by design — the only way out of an active
-   * session is to complete it. So "leave the player" cannot mean "end the
-   * session"; it means park it and hand the screen back. That is shell state,
-   * and it must reset whenever a *new* session begins.
-   */
-  const [playerParked, setPlayerParked] = useState(false);
   const isDesktop = useIsDesktop();
 
   const active = useStore((s) => s.active);
   const settings = useStore((s) => s.settings);
   const reduceMotion = Boolean(settings?.reduceMotion);
-
-  const startedAt = active?.startedAt;
-  useEffect(() => {
-    if (startedAt) setPlayerParked(false);
-  }, [startedAt]);
 
   /**
    * The palette lives in CSS keyed on `[data-theme]`; the shell only says which

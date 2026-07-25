@@ -205,10 +205,12 @@ export const SUGGESTED_PROMPTS: readonly string[] = [
   'How am I doing?',
   'What have you noticed about me?',
   'I feel 4 today',
-  'Set my daily goal to 12 minutes',
+  'Only show me breathwork',
   'Make a 4-7-8 breathing pattern',
-  'Switch the theme to dusk',
+  // Worth surfacing: someone who needs this often does not know it is on offer.
+  'The animation makes me queasy',
   'Play rain while I practise',
+  'Export my data',
 ];
 
 function reply(

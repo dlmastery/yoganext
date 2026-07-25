@@ -251,10 +251,31 @@ It reads four things out of an utterance — minutes available, an explicit 1–
 mood, an implied mood from feeling words, and an intent (`calm`, `focus`, `sleep`,
 `energy`, `grief`, `pain`) — then runs an ordered rule list, first match wins.
 
-One distinction is worth calling out. An **explicit number** is a fact about how
-someone feels, so it gets logged: *"I feel 4 today"* → `log_mood`. A **feeling
-word** implies something they want changed, so it gets acted on: *"I'm anxious"* →
-`recommend_practice`.
+It reaches **all 24 tools** — not a convenient subset. That is the claim worth
+testing, so it is tested: a scripted transcript drives one utterance per tool and
+asserts both the tool chosen and that nothing else fires.
+
+Four distinctions in the rule order carry real consequences.
+
+**An explicit number is a fact; a feeling word is a request.** *"I feel 4 today"*
+→ `log_mood`. *"I'm anxious"* → `recommend_practice`.
+
+**Stopping is not finishing.** *"I need to stop"* → `abandon_session`; *"I'm
+done"* → `complete_session`. These are kept strictly apart because completing
+credits the streak and abandoning does not. Logging a walked-away session as
+finished fakes the number the whole habit engine rests on; refusing to log a
+finished one denies credit that was earned.
+
+**Comfort rules run first.** *"the animation makes me queasy"* → `set_accessibility`
+before anything softer can swallow the word "motion". The contract asks for this
+to be immediate, and rule order is how that is honoured.
+
+**Erasing takes two turns and an unambiguous phrase.** *"delete all my data"*
+calls **nothing** — it returns the consequences, offers `export_data` first, and
+waits. Only *"yes, erase everything"* calls `reset_data`. A bare *"yes"* must
+never reach it, because the affirmative rule that resolves *"yes, start it"* is
+otherwise one ambiguous turn away from deleting someone's history. That property
+is asserted in the test suite, not just intended.
 
 And when nothing matches, it asks. It never guesses at an action. A confidently
 wrong mutation costs the user real data, in an app people open when they are not

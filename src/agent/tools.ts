@@ -834,11 +834,16 @@ const impl: Record<string, ToolFn> = {
   },
 
   reset_data: (args = {}) => {
-    if (argBool(args, 'confirm') !== true) {
+    // The ONE place loose coercion is refused. Everywhere else `argBool` folds
+    // "yes"/1/"true" into true, which is right for a model that types sloppily.
+    // Here the risk is asymmetric: a false accept destroys the user's history
+    // irreversibly, a false reject costs one retry with an explicit message. The
+    // contract says "must be true" — this reads that as strictly as possible.
+    if (args.confirm !== true) {
       // The refusal carries the script, so an agent asking for confirmation says
       // what is actually lost rather than a vague "are you sure?".
       return fail(
-        'I will not erase anything without an explicit confirmation. Tell the user plainly that this deletes every session, mood check-in, streak and milestone on this device and cannot be undone, offer export_data first, and call reset_data again with confirm: true only if they say yes.',
+        'I will not erase anything without an explicit confirmation. Tell the user plainly that this deletes every session, mood check-in, streak and milestone on this device and cannot be undone, offer export_data first, and call reset_data again with the boolean confirm: true (not the string "true") only if they say yes.',
         'confirmation_required',
       );
     }

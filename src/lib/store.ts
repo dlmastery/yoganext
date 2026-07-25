@@ -133,7 +133,7 @@ export const defaultSettings = (): Settings => ({
   name: '',
 });
 
-/** A genuinely blank slate — what `reset()` produces. */
+/** A genuinely blank slate — what `dangerouslyResetAll()` produces. */
 export const defaultAppState = (): AppState => ({
   practices: [...SEED_PRACTICES],
   sessions: [],
@@ -151,7 +151,7 @@ export const defaultAppState = (): AppState => ({
  * This is the store's INITIAL state, not a fallback — the moment a persisted
  * blob exists, `merge()` replaces every history slice with the user's own data,
  * including when that data is legitimately empty. So a returning user never
- * sees the demo, and `reset()` goes to `defaultAppState()` rather than here:
+ * sees the demo, and `dangerouslyResetAll()` goes to `defaultAppState()` rather than here:
  * "wipe everything on this device" has to actually mean wiped.
  *
  * The habit fields are folded from the seed sessions rather than hardcoded, so
@@ -692,8 +692,6 @@ export interface StoreActions {
    * and the demo history does NOT come back (a wipe means wiped).
    */
   dangerouslyResetAll: () => void;
-  /** Alias of `dangerouslyResetAll`. Prefer the explicit name in new code. */
-  reset: () => void;
   /**
    * The user's own data as pretty-printed JSON, for the You screen's export.
    * Same shape as the persisted blob, plus an `exportedAt` stamp — so an export
@@ -1033,8 +1031,6 @@ export const useStore = create<Store>()(
           _recovered: false,
         });
       },
-
-      reset: () => get().dangerouslyResetAll(),
 
       exportJSON: () => {
         const s = get();

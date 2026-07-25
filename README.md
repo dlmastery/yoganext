@@ -28,8 +28,11 @@ and the AI coach are *peer clients of the same store*.
 The invariant is enforced, not aspirational:
 
 ```
-$ verifyToolCoverage()
-ok: true | declared: 14 | implemented: 14 | missing: 0 | undeclared: 0
+$ npm run verify:agent
+coverage  24/24 tools implemented
+parity    25/25 UI capabilities resolve to a tool
+
+Everything you can tap, you can say.
 ```
 
 If a feature exists in a component but not as a tool, coverage fails. That is the
