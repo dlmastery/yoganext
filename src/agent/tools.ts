@@ -505,8 +505,23 @@ const impl: Record<string, ToolFn> = {
 
     const unlocked = s.achievements.filter((a) => a.unlockedAt).length;
 
+    /**
+     * When a saved blob is unreadable the store discards it and resets the habit
+     * slice to zero. The numbers below are then *accurate* and the encouragement
+     * built on them is *wrong*: this tool would report a 0-day streak and invite
+     * the user to start one, while the You screen is simultaneously telling them
+     * their data was destroyed by a storage fault. Someone who just watched a
+     * 40-day streak vanish will assume they misremembered before they assume the
+     * software broke — and a coach confidently agreeing with that reading is the
+     * bad outcome. So the caveat leads, before any praise can be built on zeros.
+     */
+    const recovered = s._recovered === true;
+    const recoveryLine = recovered
+      ? 'Before anything else: saved data on this device was damaged and had to be reset, so the numbers below describe a blank slate and NOT their real history. Say so plainly and do not congratulate or commiserate on these figures. '
+      : '';
+
     return ok(
-      `${streakLine} ${h.totalMinutes} minutes practised all time across ${s.sessions.length} session${s.sessions.length === 1 ? '' : 's'}. ${goalLine} ${unlocked}/${s.achievements.length} achievements unlocked.`,
+      `${recoveryLine}${streakLine} ${h.totalMinutes} minutes practised all time across ${s.sessions.length} session${s.sessions.length === 1 ? '' : 's'}. ${goalLine} ${unlocked}/${s.achievements.length} achievements unlocked.`,
       {
         streak: h.streak,
         bestStreak: h.bestStreak,
@@ -516,6 +531,7 @@ const impl: Record<string, ToolFn> = {
         practisedToday,
         sessionCount: s.sessions.length,
         achievementsUnlocked: unlocked,
+        recovered,
         recent,
       },
     );

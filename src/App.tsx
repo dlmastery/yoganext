@@ -345,41 +345,22 @@ export default function App() {
 
         <AgentConsole open={coachOpen} onClose={() => setCoachOpen(false)} />
 
-        {/* A parked session must stay findable — otherwise it is silently lost. */}
-        <AnimatePresence>
-          {active && playerParked && (
-            <motion.div
-              key="parked"
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 16 }}
-              transition={{ type: 'spring', stiffness: 380, damping: 32 }}
-              className="fixed inset-x-0 bottom-[5.5rem] z-40 flex justify-center px-5 pr-24 sm:bottom-6 sm:pl-56 sm:pr-5"
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  setPlayerParked(false);
-                  callTool('resume_session');
-                }}
-                className="glass-strong inline-flex items-center gap-3 rounded-full px-5 py-3 text-sm font-medium text-fg shadow-lg shadow-black/30 ring-1 ring-line transition-transform hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span
-                  aria-hidden="true"
-                  className="animate-breathe h-2 w-2 rounded-full bg-accent"
-                />
-                Session paused — resume
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/*
+          A running session owns the screen, and NO `onExit` is passed — that is
+          load-bearing, not an omission. Passing it would make the shell take over
+          routing, and the player's exit would park the session behind a "resume"
+          affordance instead of opening its mood check-in. That check-in is the
+          only place `moodAfter` is captured, and `moodAfter` is what the whole
+          "your mood is higher after breathwork" insight is computed from — so
+          routing around it would quietly starve the insight engine.
 
-        {/* A running session owns the screen. */}
-        <AnimatePresence>
-          {active && !playerParked && (
-            <SessionPlayer key="player" onExit={() => setPlayerParked(true)} />
-          )}
-        </AnimatePresence>
+          Without `onExit`, Escape and the X pause and offer "Keep going" / "Just
+          finish". Since `completeSession` is the only thing that clears `active`,
+          both doors are real and a practice can never be silently discarded.
+          The AnimatePresence wrapper stays: the player's root is a motion.div
+          with an exit transition, so it dissolves rather than being cut.
+        */}
+        <AnimatePresence>{active && <SessionPlayer key="player" />}</AnimatePresence>
       </div>
     </MotionConfig>
   );

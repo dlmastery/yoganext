@@ -40,6 +40,13 @@ export interface CoachContext {
   /** the practice the coach last put forward, so "yes, start it" has a referent */
   lastRecommendedPracticeId?: string;
   lastRecommendedTitle?: string;
+  /**
+   * True only on the turn immediately after the coach warned about erasing.
+   * Deliberately single-turn: it is armed by the erase warning and cleared at
+   * the start of EVERY subsequent turn, so a "yes" can only ever confirm the
+   * question actually on the table, never one from five turns ago.
+   */
+  pendingReset?: boolean;
 }
 
 export interface AgentReply {
@@ -238,6 +245,13 @@ export function respond(utterance: string, ctxIn: CoachContext = {}): AgentReply
   const t = norm(raw);
   const ctx: CoachContext = { ...ctxIn };
 
+  // Read the erase arming, then DISARM immediately. Every path out of this
+  // function therefore returns a context with `pendingReset` false unless the
+  // erase-warning branch re-arms it below. Clearing here rather than in each
+  // branch is what guarantees it: a rule added later cannot forget to do it.
+  const wasPendingReset = ctxIn.pendingReset === true;
+  ctx.pendingReset = false;
+
   if (!t) {
     return reply(
       'empty',
@@ -293,18 +307,44 @@ export function respond(utterance: string, ctxIn: CoachContext = {}): AgentReply
     return reply('export', 'asked for their data', call.result.message, call, ctx);
   }
 
-  // Destructive, so it takes two turns and an explicit phrase. A bare "yes"
-  // must never reach this — the affirmative rule that resolves "yes, start it"
-  // is otherwise one ambiguous turn away from deleting everything.
+  // Erasing takes TWO turns. This block sits above the affirmative rule that
+  // resolves "yes, start it", because that rule is otherwise one ambiguous turn
+  // away from deleting someone's history.
+  //
+  // `pendingReset` was cleared at the top of this function and is re-armed only
+  // by the branch below, so it is true here only when the IMMEDIATELY preceding
+  // turn asked to erase. Any other utterance in between disarms it — which is
+  // what makes a bare "yes" safe to honour: it can only ever mean the question
+  // actually on the table.
+  if (wasPendingReset && ERASE_CONFIRMED.test(t)) {
+    const call = run('reset_data', { confirm: true });
+    return reply(
+      'reset_confirmed',
+      'confirmed on the turn immediately after the warning',
+      call.result.message,
+      call,
+      ctx,
+    );
+  }
+
   if (ERASE.test(t)) {
+    // Same-utterance path: "yes, erase everything" is unambiguous on its own and
+    // does not need a second turn.
     if (ERASE_CONFIRMED.test(t)) {
       const call = run('reset_data', { confirm: true });
-      return reply('reset_confirmed', 'erase requested WITH an explicit confirmation in the same message', call.result.message, call, ctx);
+      return reply(
+        'reset_confirmed',
+        'erase requested WITH an explicit confirmation in the same message',
+        call.result.message,
+        call,
+        ctx,
+      );
     }
+    ctx.pendingReset = true;
     return reply(
       'reset_unconfirmed',
-      'erase requested without confirmation — refusing to act on one ambiguous turn',
-      'That erases every session, mood check-in, streak and milestone on this device, and it cannot be undone. I would rather you had a copy first — say "export my data" and I will hand it to you. If you are certain, say "yes, erase everything" and I will do it.',
+      'erase requested without confirmation — arming a one-turn confirmation instead of acting',
+      'That erases every session, mood check-in, streak and milestone on this device, and it cannot be undone. I would rather you had a copy first — say "export my data" and I will hand it to you. If you are certain, say "yes" and I will do it.',
       null,
       ctx,
       ['Export my data', 'Yes, erase everything', 'Never mind'],

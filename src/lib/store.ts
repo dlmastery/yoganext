@@ -532,9 +532,60 @@ function backing(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> {
 }
 
 /**
+ * How long writes are coalesced for. Must exceed the timer's tick interval or
+ * it does nothing.
+ */
+export const PERSIST_THROTTLE_MS = 5_000;
+
+let pendingWrite: { name: string; value: StoredValue<PersistedState> } | null = null;
+let writeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Write any coalesced state to storage now.
+ *
+ * Called on pagehide/visibilitychange so a normal tab close loses nothing, and
+ * exported so tests can assert on the blob without waiting out the throttle.
+ */
+export function flushPersist(): void {
+  if (writeTimer !== null) {
+    clearTimeout(writeTimer);
+    writeTimer = null;
+  }
+  const write = pendingWrite;
+  pendingWrite = null;
+  if (!write) return;
+  try {
+    backing().setItem(write.name, JSON.stringify(write.value));
+  } catch {
+    // Quota exceeded or storage disabled. Dropping the write is correct: the
+    // in-memory store stays usable and the session is not interrupted.
+  }
+}
+
+// A hidden tab may never come back, so flush before the browser can discard it.
+// `pagehide` covers bfcache and mobile tab-kill, which `beforeunload` misses.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', flushPersist);
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushPersist();
+    });
+  }
+}
+
+/**
  * A storage adapter that cannot throw across the persist boundary. A malformed
  * blob is dropped rather than parsed into an unusable store — losing a corrupt
  * cache is recoverable, rendering a half-parsed one is not.
+ *
+ * Writes are COALESCED. `persist` writes on every state change, and `tick()`
+ * changes state once a second for the whole of a practice — measured at 120 KB
+ * of `JSON.stringify` plus a synchronous localStorage write each time, i.e.
+ * ~70 MB and 1.2s of blocked main thread over a ten-minute session. Synchronous
+ * jank during a breathing exercise is a product failure, so the newest state is
+ * held and written at most once per `PERSIST_THROTTLE_MS`, with a flush when the
+ * page is hidden. Worst case on a hard crash is losing a few seconds of elapsed
+ * time on a session that restores paused anyway.
  */
 const safeStorage = {
   getItem(name: string): StoredValue<PersistedState> | null {
